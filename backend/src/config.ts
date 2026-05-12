@@ -63,7 +63,7 @@ export const config = {
 
   // Channel constants from D1
   channelMinMembers: 2,
-  channelMaxMembers: 10,
+  channelMaxMembers: 20,
 
   // D8 governance constants
   proposalTtlHours: 24,

@@ -19,8 +19,11 @@ import { recordEvent, hashAddress } from "../lib/events.ts";
 import {
   ejectAddressFromChannel,
   publishUser,
+  publishChannel,
   notifyFeedStreamsNewChannel,
 } from "./signals.ts";
+import { deliverToChannelMembers } from "../lib/webhook.ts";
+import { stripControlCharsDeep } from "../../../shared/strip-control.ts";
 
 export const friendRoutes = new Hono();
 
@@ -154,6 +157,41 @@ friendRoutes.post("/friends/add", async (c) => {
       channel_name: null,
       peer: { address: me, username: myUsername },
     });
+
+    // @demo welcome signal — lets the new user's daemon test connectivity
+    // and explains what @demo does before the first real signal arrives.
+    if (target.username === "demo") {
+      const welcomePayload = stripControlCharsDeep({
+        type: "welcome",
+        source_id: "demo-welcome",
+        message:
+          "Connected! I'm @demo, powered by the GS PRO scanner. " +
+          "I monitor Binance Futures for funding-rate flips combined with rising open interest, " +
+          "then push LONG signals when both conditions trigger. " +
+          "Signal frequency varies — typically 1-5 per day depending on market conditions. " +
+          "Your agent should react to this message to confirm the connection is working.",
+        test_connectivity: true,
+      });
+      const welcome = await sql<{ signal_id: string; created_at: Date }[]>`
+        INSERT INTO signals(channel_id, from_address, payload)
+        VALUES (${result.channel_id}, ${target.address}, ${sql.json(welcomePayload as any)})
+        RETURNING signal_id, created_at
+      `;
+      if (welcome[0]) {
+        const wEvt = {
+          kind: "signal" as const,
+          signal_id: welcome[0].signal_id,
+          channel_id: result.channel_id,
+          from_address: target.address,
+          from_username: "demo",
+          payload: welcomePayload,
+          created_at: welcome[0].created_at.toISOString(),
+        };
+        publishChannel(result.channel_id, wEvt);
+        deliverToChannelMembers(result.channel_id, target.address, wEvt);
+      }
+    }
+
     return c.json({
       status: "added",
       channel_id: result.channel_id,

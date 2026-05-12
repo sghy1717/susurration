@@ -966,20 +966,24 @@ function FeedPage() {
       .finally(() => setLoading(false));
   }, []);
 
-  // Build reaction counts per signal
+  // Build reaction counts + grouped reactions per signal
   const reactionCounts = new Map<string, { agrees: number; against: number }>();
+  const reactionsMap = new Map<string, FeedItem[]>();
   for (const f of feed) {
     if (f.kind !== "reaction" || !f.parent_signal_id) continue;
     const c = reactionCounts.get(f.parent_signal_id) ?? { agrees: 0, against: 0 };
     if (f.payload?.value === "+1") c.agrees++;
     else if (f.payload?.value === "-1") c.against++;
     reactionCounts.set(f.parent_signal_id, c);
+    const list = reactionsMap.get(f.parent_signal_id) ?? [];
+    list.push(f);
+    reactionsMap.set(f.parent_signal_id, list);
   }
 
   const filtered = feed.filter(f => {
-    if (activeType === "all") return true;
-    if (activeType === "signals") return f.kind === "signal";
     if (activeType === "reactions") return f.kind === "reaction";
+    if (f.kind === "reaction" && f.parent_signal_id) return false;
+    if (activeType === "signals") return f.kind === "signal";
     return true;
   });
 
@@ -1009,20 +1013,42 @@ function FeedPage() {
             const handle = item.from_username ?? item.from_address?.slice(0, 8) ?? "?";
             const avatar = (item.from_username || "?")[0]!.toUpperCase();
             const channelLabel = item.channel_name ?? item.peer?.username ?? item.channel_id?.slice(0, 8) ?? "";
+            const reactions = item.signal_id ? (reactionsMap.get(item.signal_id) ?? []) : [];
             if (item.kind === "signal" && (p.symbol || p.token)) {
               return (
-                <SignalCard
-                  key={item.signal_id ?? item.created_at}
-                  handle={handle} avatar={avatar} time={formatTime(item.created_at)}
-                  channel={channelLabel}
-                  symbol={p.symbol ?? p.token ?? "—"} direction={p.direction === "short" ? "short" : "long"}
-                  leverage={p.metadata?.leverage ?? p.leverage ?? "—"}
-                  entry={p.metadata?.entry_price ?? p.entry_price ?? p.entry ?? "—"}
-                  sltp={`${p.metadata?.stop_loss ?? p.sl ?? "—"} / ${p.metadata?.take_profit ?? p.tp ?? "—"}`}
-                  reason={p.reason ?? p.reasoning ?? ""}
-                  agrees={reactionCounts.get(item.signal_id!)?.agrees ?? 0}
-                  against={reactionCounts.get(item.signal_id!)?.against ?? 0}
-                />
+                <div className="signal-group" key={item.signal_id ?? item.created_at}>
+                  <SignalCard
+                    handle={handle} avatar={avatar} time={formatTime(item.created_at)}
+                    channel={channelLabel}
+                    symbol={p.symbol ?? p.token ?? "—"} direction={p.direction === "short" ? "short" : "long"}
+                    leverage={p.metadata?.leverage ?? p.leverage ?? "—"}
+                    entry={p.metadata?.entry_price ?? p.entry_price ?? p.entry ?? "—"}
+                    sltp={`${p.metadata?.stop_loss ?? p.sl ?? "—"} / ${p.metadata?.take_profit ?? p.tp ?? "—"}`}
+                    reason={p.reason ?? p.reasoning ?? ""}
+                    agrees={reactionCounts.get(item.signal_id!)?.agrees ?? 0}
+                    against={reactionCounts.get(item.signal_id!)?.against ?? 0}
+                  />
+                  {reactions.length > 0 && (
+                    <div className="signal-reactions">
+                      {reactions.map(r => {
+                        const rHandle = r.from_username ?? r.from_address?.slice(0, 8) ?? "?";
+                        const rAvatar = (r.from_username || "?")[0]!.toUpperCase();
+                        const rp = r.payload ?? {};
+                        const vote = rp.value === "+1" ? "👍" : rp.value === "-1" ? "👎" : "";
+                        return (
+                          <div className="reaction-inline" key={r.reaction_id ?? r.created_at}>
+                            <div className="signal-avatar" style={{ width: 22, height: 22, fontSize: 10 }}>{rAvatar}</div>
+                            <span className="reaction-handle">@{rHandle}</span>
+                            {vote && <span className="reaction-vote">{vote}</span>}
+                            {rp.note && <span className="reaction-note">{rp.note}</span>}
+                            {rp.size_factor != null && <span className="reaction-size">size: {rp.size_factor}</span>}
+                            <span className="reaction-ts">{formatTime(r.created_at)}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
               );
             }
             return (

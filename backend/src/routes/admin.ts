@@ -32,13 +32,15 @@ function adminGuard(c: Context): { ok: true } | { error: any } {
 }
 
 // GET /admin/events?since=ISO&until=ISO&type=&limit=
+// `event_type` accepted as alias for `type` to match the column name and the
+// existing `event_type` field in JSON responses (avoids silent param-name drift).
 adminRoutes.get("/admin/events", async (c) => {
   const g = adminGuard(c);
   if ("error" in g) return g.error;
 
   const since = c.req.query("since");
   const until = c.req.query("until");
-  const type = c.req.query("type");
+  const type = c.req.query("type") ?? c.req.query("event_type");
   const limit = Math.min(Math.max(Number(c.req.query("limit") ?? 100), 1), 1000);
 
   // Compose conditions safely with postgres.js fragments.
@@ -73,11 +75,18 @@ async function testAddressHashes(): Promise<string[]> {
   return rows.map(r => hashAddress(r.address));
 }
 
+// `window_hours`: optional time window (e.g. 6, 24). Default 0 = cumulative
+// (legacy behavior unchanged). Mirrors the param shape used by /admin/errors.
 adminRoutes.get("/admin/funnel", async (c) => {
   const g = adminGuard(c);
   if ("error" in g) return g.error;
 
   const excludeTest = c.req.query("exclude_test") !== "false";
+  const windowHoursRaw = c.req.query("window_hours");
+  const windowHours = windowHoursRaw === undefined ? 0 : Number(windowHoursRaw);
+  if (!Number.isFinite(windowHours) || windowHours < 0) {
+    return c.json({ error: "invalid window_hours" }, 400);
+  }
   const excludeHashes = excludeTest ? await testAddressHashes() : [];
 
   const rows = await sql<{ event_type: string; users: number }[]>`
@@ -85,6 +94,7 @@ adminRoutes.get("/admin/funnel", async (c) => {
     FROM events
     WHERE address_hash IS NOT NULL
       AND event_type IN ('auth_signin', 'register', 'friend_add_accepted', 'channel_create', 'signal_push', 'reaction_push', 'approve_signed')
+      ${windowHours > 0 ? sql`AND created_at > now() - ${windowHours + ' hours'}::interval` : sql``}
       ${excludeHashes.length > 0 ? sql`AND address_hash NOT IN ${sql(excludeHashes)}` : sql``}
     GROUP BY event_type
   `;
@@ -98,6 +108,7 @@ adminRoutes.get("/admin/funnel", async (c) => {
       ? (counts["signal_push"] ?? 0) / (counts["register"] ?? 1) : null,
     test_excluded: excludeTest,
     test_accounts_filtered: excludeHashes.length,
+    window_hours: windowHours > 0 ? windowHours : "cumulative",
   });
 });
 

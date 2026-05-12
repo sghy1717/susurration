@@ -10,8 +10,9 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   padding: 24px;
+  overflow-y: auto;
 }
 .onboarding-overlay.hidden { display: none; }
 
@@ -577,50 +578,37 @@
 .signal-card-foot {
   display: flex; align-items: center; gap: 8px;
   border-top: 0.5px solid var(--border-base); padding-top: 10px;
-  justify-content: space-between;
 }
-.react-btns {
-  display: flex; gap: 4px; margin-left: auto;
-}
-.react-btn {
-  font-size: 11px; color: var(--ink-faint); padding: 3px 10px;
-  border: 0.5px solid var(--border-base); border-radius: 3px;
-  cursor: pointer; background: none; font-family: var(--mono); transition: all 120ms;
-}
-.react-btn:hover { border-color: var(--ink-faint); color: var(--ink-soft); }
-.react-btn.react-agree:hover, .react-btn.react-agree.active { border-color: var(--green); color: var(--green); background: rgba(76,175,80,0.06); }
-.react-btn.react-against:hover, .react-btn.react-against.active { border-color: var(--red); color: var(--red); background: rgba(239,83,80,0.06); }
-.react-form {
-  border-top: 0.5px solid var(--border-base); padding-top: 10px; margin-top: 4px;
-}
-.react-form-row {
-  display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
-}
-.react-form-label {
-  font-size: 10px; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.5px; min-width: 32px;
-}
-.react-slider {
-  flex: 1; accent-color: var(--ink-soft); height: 2px;
-}
-.react-slider-val {
-  font-size: 11px; color: var(--ink-soft); font-family: var(--mono); min-width: 24px; text-align: right;
-}
-.react-note-input {
-  flex: 1; font-size: 11px; padding: 4px 8px; background: var(--bg); border: 0.5px solid var(--border-base);
-  color: var(--ink); font-family: var(--mono); outline: none;
-}
-.react-note-input:focus { border-color: var(--ink-faint); }
-.react-submit-btn {
-  font-size: 11px; padding: 4px 12px; background: var(--ink-faint); color: var(--bg);
-  border: none; cursor: pointer; font-family: var(--mono); transition: background 120ms;
-}
-.react-submit-btn:hover { background: var(--ink-soft); }
-.react-submit-btn:disabled { opacity: 0.5; cursor: default; }
 .react-count {
   font-size: 11px; color: var(--ink-faint);
   display: flex; align-items: center; gap: 4px;
 }
 .react-count span { color: var(--ink-soft); }
+
+/* Signal group — signal + nested reactions */
+.signal-group {
+  display: flex; flex-direction: column;
+}
+.signal-reactions {
+  border-left: 2px solid var(--border2);
+  margin-left: 20px;
+  padding: 6px 0 2px 12px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.reaction-inline {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--ink-soft);
+  background: var(--surface);
+  border: 0.5px solid var(--border-base);
+  border-radius: 2px;
+}
+.reaction-handle { font-weight: 500; color: var(--ink); }
+.reaction-vote { font-size: 13px; }
+.reaction-note { color: var(--ink-faint); font-style: italic; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reaction-size { color: var(--ink-faint); font-size: 10px; }
+.reaction-ts { color: var(--ink-faint); font-size: 10px; margin-left: auto; flex-shrink: 0; }
 
 /* Positions */
 .positions-card {
@@ -862,6 +850,170 @@
   flex: 1; height: 3px; background: var(--surface3); border-radius: 2px; min-width: 80px;
 }
 .usage-bar-fill { height: 100%; border-radius: 2px; background: var(--ink-faint); }
+
+/* ── POLISH: micro-interactions ── */
+
+/* Cards — subtle lift on hover */
+.stat-card,
+.positions-card,
+.signal-card,
+.friend-profile-card,
+.settings-section,
+.rec-friend-card,
+.conn-test {
+  border-radius: 6px;
+  transition: border-color 200ms ease, box-shadow 200ms ease, transform 200ms ease;
+}
+.stat-card:hover,
+.positions-card:hover,
+.signal-card:hover {
+  border-color: rgba(165, 180, 199, 0.22);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.18);
+  transform: translateY(-1px);
+}
+.friend-profile-card:hover {
+  border-color: rgba(165, 180, 199, 0.22);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.18);
+}
+
+/* Buttons — smooth radius + hover glow */
+.add-btn,
+.d-btn,
+.ob-btn-next,
+.conn-test-btn,
+.filter-chip,
+.ide-pill,
+.d-copy-btn,
+.p-acc,
+.p-dec,
+.signal-missed-badge,
+.signal-channel-badge,
+.d-tag {
+  border-radius: 4px;
+  transition: color 180ms ease, background 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+}
+.add-btn:hover,
+.d-btn:hover,
+.ob-btn-next:hover,
+.conn-test-btn:hover {
+  box-shadow: 0 0 0 2px rgba(165, 180, 199, 0.08);
+}
+
+/* Primary button special glow */
+.btn-primary,
+.d-btn-primary {
+  border-radius: 4px;
+  transition: all 200ms ease;
+}
+.btn-primary:hover,
+.d-btn-primary:hover {
+  box-shadow: 0 0 0 3px rgba(165, 180, 199, 0.10);
+}
+
+/* Input focus glow */
+.add-friend-row,
+.handle-input-wrap {
+  border-radius: 6px;
+  transition: border-color 200ms ease, box-shadow 200ms ease;
+}
+.add-friend-row:focus-within,
+.handle-input-wrap:focus-within {
+  box-shadow: 0 0 0 2px rgba(165, 180, 199, 0.08);
+}
+
+/* Nav items — smoother transitions */
+.d-nav-item {
+  transition: color 180ms ease, background 180ms ease, transform 150ms ease;
+}
+.d-nav-item:active {
+  transform: scale(0.93);
+}
+
+/* Friend list items — smooth selection */
+.friend-item {
+  border-radius: 6px;
+  transition: background 180ms ease, border-color 180ms ease, transform 150ms ease;
+}
+.friend-item:active {
+  transform: scale(0.98);
+}
+
+/* Avatar circles — subtle pulse on card hover */
+.friend-avatar,
+.friend-avatar-lg,
+.signal-avatar {
+  transition: border-color 200ms ease, box-shadow 200ms ease;
+}
+.friend-profile-card:hover .friend-avatar-lg {
+  border-color: rgba(165, 180, 199, 0.28);
+  box-shadow: 0 0 0 3px rgba(165, 180, 199, 0.06);
+}
+
+/* Pending items + code blocks — rounded */
+.pending-item {
+  border-radius: 4px;
+  transition: background 180ms ease;
+}
+.d-code-block {
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+/* Status hover popup — smooth appear */
+.status-hover {
+  border-radius: 6px;
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 180ms ease, transform 180ms ease;
+  pointer-events: none;
+}
+.status-badge:hover .status-hover {
+  display: block;
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+/* Auth buttons — rounded */
+.auth-btn {
+  border-radius: 6px;
+  transition: border-color 200ms ease, background 200ms ease, box-shadow 200ms ease;
+}
+.auth-btn:hover {
+  box-shadow: 0 0 0 2px rgba(165, 180, 199, 0.06);
+}
+
+/* Signal grid — inner rounding */
+.signal-grid {
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+/* Settings rows — fade on hover */
+.settings-row {
+  transition: background 180ms ease;
+}
+.settings-row:hover {
+  background: rgba(165, 180, 199, 0.03);
+}
+
+/* Positions rows — subtle highlight */
+.positions-row {
+  transition: background 150ms ease;
+}
+.positions-row:hover {
+  background: rgba(165, 180, 199, 0.04);
+}
+
+/* Tooltips — smoother fade */
+.d-nav-item[data-tip]::after {
+  border-radius: 4px;
+  transition: opacity 180ms ease, transform 180ms ease;
+  transform: translateY(-50%) translateX(-4px);
+}
+.d-nav-item[data-tip]:hover::after {
+  transform: translateY(-50%) translateX(0);
+}
 
 /* ── SCROLLBAR ── */
 .dash-shell ::-webkit-scrollbar { width: 3px; }

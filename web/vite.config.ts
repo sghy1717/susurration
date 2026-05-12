@@ -15,11 +15,10 @@ export default defineConfig({
     // Single source of truth for AGENT_DOC lives there — see `shared/agent-doc.ts`.
     fs: { allow: [".."] },
     proxy: {
-      // In dev, proxy /api/* to the local backend so we don't fight CORS.
       "/api": {
-        target: "http://localhost:8787",
+        target: "https://susurration.fly.dev",
         changeOrigin: true,
-        // Backend now mounts routes at /api/*, so no rewrite — pass through.
+        secure: true,
       },
     },
   },

@@ -123,6 +123,21 @@ channelRoutes.post("/channels", async (c) => {
   }
 });
 
+// ─── GET /channels/groups — list caller's group channels ──────────────────
+channelRoutes.get("/channels/groups", async (c) => {
+  let me: string;
+  try { me = await withAuth(c); } catch (e) { return authError(c, e); }
+  const rows = await sql`
+    SELECT c.channel_id, c.name, c.owner, c.created_at,
+           (SELECT count(*)::int FROM channel_members cm2 WHERE cm2.channel_id = c.channel_id) AS member_count
+    FROM channels c
+    JOIN channel_members cm ON cm.channel_id = c.channel_id
+    WHERE cm.address = ${me} AND c.is_group = true
+    ORDER BY c.created_at DESC
+  `;
+  return c.json({ groups: rows });
+});
+
 // ─── GET /channels/:id ────────────────────────────────────────────────────
 channelRoutes.get("/channels/:id", async (c) => {
   let me: string;
@@ -163,9 +178,15 @@ channelRoutes.post("/channels/:id/invite", async (c) => {
   const channelId = c.req.param("id");
   const body = await parseJsonBody(c);
   if (body === null) return invalidJson(c);
-  const target = String(body?.address ?? "");
 
-  if (!isValidSolanaAddress(target)) return c.json({ error: "invalid solana address" }, 400);
+  let target = String(body?.address ?? "");
+  if (!target && body?.username) {
+    const row = await sql<{ address: string }[]>`SELECT address FROM identities WHERE username = ${String(body.username).toLowerCase().replace(/^@/, "")} LIMIT 1`;
+    if (row.length === 0) return c.json({ error: "user not found" }, 404);
+    target = row[0]!.address;
+  }
+
+  if (!isValidSolanaAddress(target)) return c.json({ error: "invalid solana address or username" }, 400);
 
   try { rateCheck(`invite:${me}`, INVITE_PER_ADDR); }
   catch (e) {

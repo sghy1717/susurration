@@ -388,9 +388,17 @@ async function main() {
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
 
+  let lastPingAt = 0;
+  const PING_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
+
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const name = req.params.name;
     const args = (req.params.arguments ?? {}) as Record<string, any>;
+    // Heartbeat: update ping on every tool call (throttled to 2min)
+    if (cfg.token && Date.now() - lastPingAt > PING_INTERVAL_MS) {
+      lastPingAt = Date.now();
+      api(cfg, "POST", "/identity/ping").catch(() => {});
+    }
     try {
       let result: any;
       switch (name) {

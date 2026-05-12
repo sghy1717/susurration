@@ -811,6 +811,9 @@ signalRoutes.get("/signals/feed/stream", async (c) => {
   const handle = handleRow[0]?.username ? `@${handleRow[0].username}` : logAddr(me);
   console.log(`[sse:feed] connect ${handle} channels=${channelMeta.size}`);
 
+  // Mark daemon as connected on SSE join
+  sql`UPDATE identities SET last_daemon_ping_at = now() WHERE address = ${me}`.catch(() => {});
+
   return streamSSE(c, async (stream) => {
     let aborted = false;
     type EnrichedEvent = Event & Partial<FeedStreamMeta>;
@@ -876,8 +879,14 @@ signalRoutes.get("/signals/feed/stream", async (c) => {
     });
     unsubs.push(unregExtender);
 
+    let lastDaemonPing = Date.now();
+    const DAEMON_PING_INTERVAL = 3 * 60 * 1000; // 3 min
     const heartbeat = setInterval(() => {
       stream.writeSSE({ event: "ping", data: String(Date.now()) }).catch(() => {});
+      if (Date.now() - lastDaemonPing > DAEMON_PING_INTERVAL) {
+        lastDaemonPing = Date.now();
+        sql`UPDATE identities SET last_daemon_ping_at = now() WHERE address = ${me}`.catch(() => {});
+      }
     }, 5_000);
 
     stream.onAbort(() => {
