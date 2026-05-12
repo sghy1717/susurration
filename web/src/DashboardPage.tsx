@@ -947,120 +947,6 @@ function DashHome() {
   );
 }
 
-// ── Push signal form ──
-function PushSignalForm({ friends, onPushed, onCancel }: {
-  friends: Friend[];
-  onPushed: () => void;
-  onCancel: () => void;
-}) {
-  const { t } = useLang();
-  const [target, setTarget] = useState(friends[0]?.channel_id ?? "");
-  const [token, setToken] = useState("");
-  const [direction, setDirection] = useState<"long" | "short">("long");
-  const [entryPrice, setEntryPrice] = useState("");
-  const [stopLoss, setStopLoss] = useState("");
-  const [takeProfit, setTakeProfit] = useState("");
-  const [leverage, setLeverage] = useState("3");
-  const [confidence, setConfidence] = useState(0.7);
-  const [horizon, setHorizon] = useState("4h");
-  const [reason, setReason] = useState("");
-  const [state, setState] = useState<"idle" | "sending" | "sent" | "error">("idle");
-  const [error, setError] = useState("");
-
-  const submit = async () => {
-    if (!target || !token || !entryPrice) return;
-    setState("sending");
-    setError("");
-    const payload = {
-      direction,
-      token: token.toUpperCase(),
-      confidence,
-      horizon,
-      reason,
-      source_id: "web-dashboard",
-      metadata: {
-        entry_price: Number(entryPrice),
-        stop_loss: stopLoss ? Number(stopLoss) : undefined,
-        take_profit: takeProfit ? Number(takeProfit) : undefined,
-        leverage: Number(leverage),
-      },
-    };
-    try {
-      await apiFetch(`/channels/${target}/signals`, { method: "POST", body: JSON.stringify(payload) });
-      setState("sent");
-      setTimeout(() => { onPushed(); }, 800);
-    } catch (e: any) {
-      setState("error");
-      setError(e?.message ?? "failed");
-      setTimeout(() => setState("idle"), 3000);
-    }
-  };
-
-  return (
-    <div className="push-form">
-      <div className="push-form-header">
-        <span className="push-form-title">{t("push.title")}</span>
-        <button className="push-form-cancel" onClick={onCancel}>{t("push.cancel")}</button>
-      </div>
-      <div className="push-form-grid">
-        <div className="push-field">
-          <label>{t("push.to")}</label>
-          <select value={target} onChange={e => setTarget(e.target.value)}>
-            {friends.map(f => (
-              <option key={f.channel_id} value={f.channel_id}>@{f.friend_username ?? f.friend_address.slice(0, 8)}</option>
-            ))}
-          </select>
-        </div>
-        <div className="push-field">
-          <label>{t("push.token")}</label>
-          <input type="text" placeholder={t("push.tokenPlaceholder")} value={token} onChange={e => setToken(e.target.value)} />
-        </div>
-        <div className="push-field">
-          <label>{t("push.direction")}</label>
-          <div className="push-dir-toggle">
-            <button className={`push-dir-btn long${direction === "long" ? " active" : ""}`} onClick={() => setDirection("long")}>{t("push.long")}</button>
-            <button className={`push-dir-btn short${direction === "short" ? " active" : ""}`} onClick={() => setDirection("short")}>{t("push.short")}</button>
-          </div>
-        </div>
-        <div className="push-field">
-          <label>{t("push.entryPrice")}</label>
-          <input type="number" step="any" value={entryPrice} onChange={e => setEntryPrice(e.target.value)} />
-        </div>
-        <div className="push-field">
-          <label>{t("push.stopLoss")}</label>
-          <input type="number" step="any" value={stopLoss} onChange={e => setStopLoss(e.target.value)} />
-        </div>
-        <div className="push-field">
-          <label>{t("push.takeProfit")}</label>
-          <input type="number" step="any" value={takeProfit} onChange={e => setTakeProfit(e.target.value)} />
-        </div>
-        <div className="push-field">
-          <label>{t("push.leverage")}</label>
-          <input type="number" min="1" max="125" value={leverage} onChange={e => setLeverage(e.target.value)} />
-        </div>
-        <div className="push-field">
-          <label>{t("push.confidence")} ({confidence.toFixed(1)})</label>
-          <input type="range" min="0.1" max="1.0" step="0.1" value={confidence} onChange={e => setConfidence(Number(e.target.value))} />
-        </div>
-        <div className="push-field">
-          <label>{t("push.horizon")}</label>
-          <input type="text" placeholder={t("push.horizonPlaceholder")} value={horizon} onChange={e => setHorizon(e.target.value)} />
-        </div>
-      </div>
-      <div className="push-field" style={{ marginTop: 8 }}>
-        <label>{t("push.reason")}</label>
-        <input type="text" placeholder={t("push.reasonPlaceholder")} value={reason} onChange={e => setReason(e.target.value)} />
-      </div>
-      <div className="push-form-actions">
-        {error && <span style={{ fontSize: 11, color: "var(--red)" }}>{error}</span>}
-        <button className="btn-primary push-submit" onClick={submit} disabled={state === "sending" || !target || !token || !entryPrice}>
-          {state === "sending" ? t("push.sending") : state === "sent" ? t("push.success") : t("push.submit")}
-        </button>
-      </div>
-    </div>
-  );
-}
-
 // ════════════════════════════════════════════════════════
 //   FEED PAGE
 // ════════════════════════════════════════════════════════
@@ -1070,19 +956,12 @@ function FeedPage() {
   const [feed, setFeed] = useState<FeedItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeType, setActiveType] = useState("all");
-  const [showPush, setShowPush] = useState(false);
-  const [friends, setFriends] = useState<Friend[]>([]);
 
-  const loadFeed = useCallback(() => {
+  useEffect(() => {
     apiFetch<{ events: FeedItem[] }>("/signals/feed?limit=50")
       .then(r => setFeed(r.events ?? []))
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, []);
-
-  useEffect(() => {
-    loadFeed();
-    apiFetch<{ friends: Friend[] }>("/friends").then(r => setFriends(r.friends)).catch(() => {});
   }, []);
 
   const handleReact = async (signalId: string, value: "+1" | "-1", sizeFactor: number, note: string) => {
@@ -1103,16 +982,8 @@ function FeedPage() {
         <div className="d-page-title">susurration / <strong>{t("feed.title")}</strong></div>
         <div className="header-actions">
           <span style={{ fontSize: 11, color: "var(--ink-faint)" }}>{feed.length} {t("feed.items")}</span>
-          <button className="btn-primary" style={{ fontSize: 11, padding: "5px 14px", marginLeft: 8 }} onClick={() => setShowPush(!showPush)}>
-            {showPush ? t("push.cancel") : t("push.btn")}
-          </button>
         </div>
       </div>
-      {showPush && (
-        friends.length > 0
-          ? <PushSignalForm friends={friends} onPushed={() => { setShowPush(false); loadFeed(); }} onCancel={() => setShowPush(false)} />
-          : <div style={{ padding: "16px 20px", fontSize: 12, color: "var(--ink-faint)" }}>{t("push.noFriends")}</div>
-      )}
       <div className="feed-mobile-tabs">
         {["all", "signals", "reactions"].map((f) => (
           <button key={f} className={`feed-mobile-tab ${activeType === f ? "active" : ""}`} onClick={() => setActiveType(f)}>
