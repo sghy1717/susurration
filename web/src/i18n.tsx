@@ -167,15 +167,6 @@ const dict: Record<Lang, Record<string, string>> = {
     "sig.missed": "missed",
     "sig.expiredNote": "Signal expired — not sent to agent",
 
-    // React
-    "react.btn.agree": "+1",
-    "react.btn.against": "−1",
-    "react.sizeFactor": "Size",
-    "react.notePlaceholder": "Short note (optional)",
-    "react.submit": "Send",
-    "react.sending": "…",
-    "react.sent": "Sent",
-
     // Friends
     "friends.title": "friends",
     "friends.onlineOf": "online of",
@@ -438,15 +429,6 @@ const dict: Record<Lang, Record<string, string>> = {
     "sig.skip": "跳过",
     "sig.missed": "离线错过",
     "sig.expiredNote": "信号已过期 — 未推送给 Agent",
-
-    // React
-    "react.btn.agree": "+1",
-    "react.btn.against": "−1",
-    "react.sizeFactor": "仓位",
-    "react.notePlaceholder": "简短备注（可选）",
-    "react.submit": "发送",
-    "react.sending": "…",
-    "react.sent": "已发送",
 
     // Friends
     "friends.title": "好友",
