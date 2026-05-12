@@ -149,6 +149,18 @@ interface FriendRequest {
   from_username: string | null;
   created_at: string;
 }
+interface Group {
+  channel_id: string;
+  name: string | null;
+  owner: string;
+  created_at: string;
+  member_count: number;
+}
+interface GroupMember {
+  address: string;
+  username: string | null;
+  joined_at: string;
+}
 interface FeedItem {
   kind: string;
   signal_id: string | null;
@@ -251,6 +263,11 @@ function buildPositions(feed: FeedItem[], myAddress: string): Position[] {
   return positions;
 }
 
+const TIME_STOP_MS = 48 * 60 * 60 * 1000; // 48h
+const TRAILING_STOP_THRESHOLD = 5; // activate after 5% profit
+const TRAILING_STOP_RETRACE = 0.5; // close when retraced 50% from peak
+const peakPnlMap = new Map<string, number>(); // signalId → highest pnlPct seen
+
 function applyPrices(positions: Position[], prices: Record<string, number>): Position[] {
   return positions.map(pos => {
     const cp = prices[pos.token];
@@ -262,20 +279,38 @@ function applyPrices(positions: Position[], prices: Record<string, number>): Pos
       : ((cp - pos.entryPrice) / pos.entryPrice) * 100 * pos.leverage;
     const pnlUsd = (pnlPct / 100) * pos.positionUsd;
 
+    // Time stop: close at market after 48h
+    const ageMs = Date.now() - new Date(pos.openedAt).getTime();
+    if (ageMs > TIME_STOP_MS) {
+      peakPnlMap.delete(pos.signalId);
+      return { ...pos, currentPrice: cp, pnlPct, pnlUsd, status: "closed" as const, exitReason: "TIME", exitPrice: cp };
+    }
+
     const hitSl = isShort ? cp >= pos.stopLoss : cp <= pos.stopLoss;
     const hitTp = isShort ? cp <= pos.takeProfit : cp >= pos.takeProfit;
 
     if (hitSl) {
+      peakPnlMap.delete(pos.signalId);
       const exitPnl = isShort
         ? ((pos.entryPrice - pos.stopLoss) / pos.entryPrice) * 100 * pos.leverage
         : ((pos.stopLoss - pos.entryPrice) / pos.entryPrice) * 100 * pos.leverage;
       return { ...pos, currentPrice: cp, pnlPct: exitPnl, pnlUsd: (exitPnl / 100) * pos.positionUsd, status: "closed" as const, exitReason: "SL", exitPrice: pos.stopLoss };
     }
     if (hitTp) {
+      peakPnlMap.delete(pos.signalId);
       const exitPnl = isShort
         ? ((pos.entryPrice - pos.takeProfit) / pos.entryPrice) * 100 * pos.leverage
         : ((pos.takeProfit - pos.entryPrice) / pos.entryPrice) * 100 * pos.leverage;
       return { ...pos, currentPrice: cp, pnlPct: exitPnl, pnlUsd: (exitPnl / 100) * pos.positionUsd, status: "closed" as const, exitReason: "TP", exitPrice: pos.takeProfit };
+    }
+
+    // Trailing stop: track peak PnL, close if retraced 50% from peak after threshold
+    const prevPeak = peakPnlMap.get(pos.signalId) ?? 0;
+    const newPeak = Math.max(prevPeak, pnlPct);
+    peakPnlMap.set(pos.signalId, newPeak);
+    if (newPeak > TRAILING_STOP_THRESHOLD && pnlPct < newPeak * TRAILING_STOP_RETRACE) {
+      peakPnlMap.delete(pos.signalId);
+      return { ...pos, currentPrice: cp, pnlPct, pnlUsd, status: "closed" as const, exitReason: "TRAIL", exitPrice: cp };
     }
 
     return { ...pos, currentPrice: cp, pnlPct, pnlUsd, status: "open" as const };
@@ -345,29 +380,13 @@ function CopyBtn({ text, className }: { text: string; className?: string }) {
 }
 
 // ── Signal card (shared between dashboard + feed) ──
-function SignalCard({ handle, avatar, avatarColor, time, channel, symbol, direction, leverage, entry, sltp, reason, agrees, against, skips, compact, expired, signalId, onReact }: {
+function SignalCard({ handle, avatar, avatarColor, time, channel, symbol, direction, leverage, entry, sltp, reason, agrees, against, skips, compact, expired }: {
   handle: string; avatar: string; avatarColor?: string; time: string; channel: string;
   symbol: string; direction: "long" | "short"; leverage: string; entry: string; sltp: string;
   reason: string; agrees: number; against: number; skips?: number; compact?: boolean; expired?: boolean;
-  signalId?: string; onReact?: (signalId: string, value: "+1" | "-1", sizeFactor: number, note: string) => Promise<void>;
 }) {
   const { t } = useLang();
   const dirLabel = direction === "long" ? "LONG" : "SHORT";
-  const [reactOpen, setReactOpen] = useState<"+1" | "-1" | null>(null);
-  const [sizeFactor, setSizeFactor] = useState(0.7);
-  const [note, setNote] = useState("");
-  const [reactState, setReactState] = useState<"idle" | "sending" | "sent">("idle");
-
-  const submitReact = async () => {
-    if (!signalId || !onReact || !reactOpen) return;
-    setReactState("sending");
-    try {
-      await onReact(signalId, reactOpen, sizeFactor, note);
-      setReactState("sent");
-      setTimeout(() => { setReactOpen(null); setReactState("idle"); setNote(""); setSizeFactor(0.7); }, 1200);
-    } catch { setReactState("idle"); }
-  };
-
   return (
     <div className={`signal-card${expired ? " signal-expired" : ""}`}>
       <div className="signal-card-head">
@@ -391,36 +410,12 @@ function SignalCard({ handle, avatar, avatarColor, time, channel, symbol, direct
         {expired ? (
           <span className="react-count" style={{ opacity: 0.5 }}>{t("sig.expiredNote")}</span>
         ) : (
-          <>
-            <span className="react-count">
-              <span>{agrees}</span> {t("sig.agree")} · <span>{against}</span> {t("sig.against")}
-              {skips !== undefined && <> · <span>{skips}</span> {t("sig.skip")}</>}
-            </span>
-            {signalId && onReact && reactState !== "sent" && (
-              <span className="react-btns">
-                <button className={`react-btn react-agree${reactOpen === "+1" ? " active" : ""}`} onClick={() => setReactOpen(reactOpen === "+1" ? null : "+1")}>{t("react.btn.agree")}</button>
-                <button className={`react-btn react-against${reactOpen === "-1" ? " active" : ""}`} onClick={() => setReactOpen(reactOpen === "-1" ? null : "-1")}>{t("react.btn.against")}</button>
-              </span>
-            )}
-            {reactState === "sent" && <span style={{ fontSize: 11, color: "var(--green)" }}>{t("react.sent")}</span>}
-          </>
+          <span className="react-count">
+            <span>{agrees}</span> {t("sig.agree")} · <span>{against}</span> {t("sig.against")}
+            {skips !== undefined && <> · <span>{skips}</span> {t("sig.skip")}</>}
+          </span>
         )}
       </div>
-      {reactOpen && (
-        <div className="react-form">
-          <div className="react-form-row">
-            <label className="react-form-label">{t("react.sizeFactor")}</label>
-            <input type="range" min="0.3" max="1.0" step="0.1" value={sizeFactor} onChange={e => setSizeFactor(Number(e.target.value))} className="react-slider" />
-            <span className="react-slider-val">{sizeFactor.toFixed(1)}</span>
-          </div>
-          <div className="react-form-row">
-            <input type="text" className="react-note-input" placeholder={t("react.notePlaceholder")} value={note} onChange={e => setNote(e.target.value)} maxLength={80} onKeyDown={e => e.key === "Enter" && submitReact()} />
-            <button className="react-submit-btn" onClick={submitReact} disabled={reactState === "sending"}>
-              {reactState === "sending" ? t("react.sending") : t("react.submit")}
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -429,7 +424,7 @@ function SignalCard({ handle, avatar, avatarColor, time, channel, symbol, direct
 //   ONBOARDING
 // ════════════════════════════════════════════════════════
 function Onboarding({ onComplete }: { onComplete: () => void }) {
-  const { t } = useLang();
+  const { t, lang } = useLang();
   const [step, setStep] = useState(1);
   const [selectedWallet, setSelectedWallet] = useState<string | null>(null);
   const [walletConnecting, setWalletConnecting] = useState(false);
@@ -629,18 +624,21 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
           </div>
 
           {/* MCP-based agents */}
-          {(["claude", "cursor", "copilot", "windsurf", "codex", "cline"] as AgentId[]).map((aid) => (
+          {(["claude", "cursor", "copilot", "windsurf", "codex", "cline"] as AgentId[]).map((aid) => {
+            const promptText = `Add the Susurration MCP server to your config, then run susu_join to complete setup.\n\nMCP config JSON:\n${mcpJson(authToken || "sk_live_YOUR_TOKEN")}\n\n⚠️ IMPORTANT: After adding the config, you MUST fully restart your agent (quit and reopen the app — e.g. close the Claude Code terminal and start a new session). The MCP server only loads on startup. Without a restart, connection test will fail.\n\nAfter restart, run:\n  susu_join @${handleVal || "your_handle"} --llm-key YOUR_LLM_API_KEY\n\nTo verify: run susu_whoami — you should see your @handle.`;
+            return (
             <div key={aid} className={`agent-setup ${selectedAgent === aid ? "visible" : ""}`}>
               <div className="d-code-block">
                 <div className="d-code-block-label">
-                  <span>{t(`agent.${aid}.label`)}</span>
-                  <CopyBtn text={mcpJson(authToken || "sk_live_YOUR_TOKEN")} />
+                  <span>{lang === "zh" ? "完整提示词（复制给你的 Agent）" : "Prompt (copy to your Agent)"}</span>
+                  <CopyBtn text={promptText} />
                 </div>
-                <McpJsonPre token={authToken || "sk_live_YOUR_TOKEN"} />
+                <pre style={{ whiteSpace: "pre-wrap", fontSize: 11, lineHeight: 1.6, color: "var(--ink-soft)" }}>{promptText}</pre>
               </div>
               <div className="agent-tip">{t(`agent.${aid}.tip`)}</div>
             </div>
-          ))}
+            );
+          })}
 
           {/* Other */}
           <div className={`agent-setup ${selectedAgent === "other" ? "visible" : ""}`}>
@@ -679,7 +677,6 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
               </div>
             </div>
             <div className="agent-tip" style={{ marginTop: 12 }}>
-              <a href="#" style={{ color: "var(--ink)", textDecoration: "underline", textUnderlineOffset: 2 }}>{t("agent.other.docsLink")}</a>{" "}
               {t("agent.other.docsDesc")}
             </div>
           </div>
@@ -716,7 +713,11 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
 
           <div className="onboard-nav">
             <button className="ob-btn-back" onClick={() => goStep(2)}>{t("ob.back")}</button>
-            <button className="ob-btn-next" disabled={connState !== "success" && !skipped} onClick={() => { localStorage.setItem("susu_agent", selectedAgent); onComplete(); }}>{t("ob.enter")}</button>
+            <button className="ob-btn-next" disabled={connState !== "success" && !skipped} onClick={() => {
+              localStorage.setItem("susu_agent", selectedAgent);
+              apiFetch("/friends/add", { method: "POST", body: JSON.stringify({ username: "demo" }) }).catch(() => {});
+              onComplete();
+            }}>{t("ob.enter")}</button>
           </div>
         </div>
       </div>
@@ -782,6 +783,7 @@ function Sidebar({ page, setPage }: { page: Page; setPage: (p: Page) => void }) 
         ))}
       </div>
       <div className="sidebar-bottom">
+        <LangToggle />
         <div className="avatar-btn">{(useAuth().username || "?")[0]!.toUpperCase()}</div>
       </div>
     </nav>
@@ -958,16 +960,21 @@ function FeedPage() {
   const [activeType, setActiveType] = useState("all");
 
   useEffect(() => {
-    apiFetch<{ events: FeedItem[] }>("/signals/feed?limit=50")
+    apiFetch<{ events: FeedItem[] }>("/signals/feed?limit=200")
       .then(r => setFeed(r.events ?? []))
       .catch(() => {})
       .finally(() => setLoading(false));
   }, []);
 
-  const handleReact = async (signalId: string, value: "+1" | "-1", sizeFactor: number, note: string) => {
-    const payload = { value, size_factor: sizeFactor, note: note || undefined };
-    await apiFetch(`/signals/${signalId}/reactions`, { method: "POST", body: JSON.stringify(payload) });
-  };
+  // Build reaction counts per signal
+  const reactionCounts = new Map<string, { agrees: number; against: number }>();
+  for (const f of feed) {
+    if (f.kind !== "reaction" || !f.parent_signal_id) continue;
+    const c = reactionCounts.get(f.parent_signal_id) ?? { agrees: 0, against: 0 };
+    if (f.payload?.value === "+1") c.agrees++;
+    else if (f.payload?.value === "-1") c.against++;
+    reactionCounts.set(f.parent_signal_id, c);
+  }
 
   const filtered = feed.filter(f => {
     if (activeType === "all") return true;
@@ -1002,7 +1009,6 @@ function FeedPage() {
             const handle = item.from_username ?? item.from_address?.slice(0, 8) ?? "?";
             const avatar = (item.from_username || "?")[0]!.toUpperCase();
             const channelLabel = item.channel_name ?? item.peer?.username ?? item.channel_id?.slice(0, 8) ?? "";
-            const isOwnSignal = item.from_address === auth.address;
             if (item.kind === "signal" && (p.symbol || p.token)) {
               return (
                 <SignalCard
@@ -1013,9 +1019,9 @@ function FeedPage() {
                   leverage={p.metadata?.leverage ?? p.leverage ?? "—"}
                   entry={p.metadata?.entry_price ?? p.entry_price ?? p.entry ?? "—"}
                   sltp={`${p.metadata?.stop_loss ?? p.sl ?? "—"} / ${p.metadata?.take_profit ?? p.tp ?? "—"}`}
-                  reason={p.reason ?? p.reasoning ?? ""} agrees={0} against={0}
-                  signalId={!isOwnSignal ? (item.signal_id ?? undefined) : undefined}
-                  onReact={!isOwnSignal ? handleReact : undefined}
+                  reason={p.reason ?? p.reasoning ?? ""}
+                  agrees={reactionCounts.get(item.signal_id!)?.agrees ?? 0}
+                  against={reactionCounts.get(item.signal_id!)?.against ?? 0}
                 />
               );
             }
@@ -1071,6 +1077,7 @@ function FeedPage() {
 function FriendsPage() {
   const { t, lang } = useLang();
   const auth = useAuth();
+  const [tab, setTab] = useState<"friends" | "groups">("friends");
   const [friends, setFriends] = useState<Friend[]>([]);
   const [requests, setRequests] = useState<FriendRequest[]>([]);
   const [feed, setFeed] = useState<FeedItem[]>([]);
@@ -1079,15 +1086,32 @@ function FriendsPage() {
   const [addVal, setAddVal] = useState("");
   const [addFeedback, setAddFeedback] = useState<"idle" | "sending" | "sent" | "error">("idle");
   const [addError, setAddError] = useState("");
-  const [recAdded, setRecAdded] = useState(false);
+  const [removingFriend, setRemovingFriend] = useState<string | null>(null);
+
+  // Groups state
+  const [groups, setGroups] = useState<Group[]>([]);
+  const [selectedGroup, setSelectedGroup] = useState<string | null>(null);
+  const [groupMembers, setGroupMembers] = useState<GroupMember[]>([]);
+  const [createName, setCreateName] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [inviteVal, setInviteVal] = useState("");
+  const [inviteFb, setInviteFb] = useState<"idle" | "sending" | "sent" | "error">("idle");
 
   const reload = useCallback(() => {
-    apiFetch<{ friends: Friend[] }>("/friends").then(r => { setFriends(r.friends); if (!selected && r.friends.length) setSelected(r.friends[0]!.friend_username ?? r.friends[0]!.friend_address); }).catch(() => {});
+    apiFetch<{ friends: Friend[] }>("/friends").then(r => { setFriends(r.friends); if (tab === "friends" && !selected && r.friends.length) setSelected(r.friends[0]!.friend_username ?? r.friends[0]!.friend_address); }).catch(() => {});
     apiFetch<{ requests: FriendRequest[] }>("/friends/requests").then(r => setRequests(r.requests)).catch(() => {});
-  }, [selected]);
+  }, [selected, tab]);
+
+  const reloadGroups = useCallback(() => {
+    apiFetch<{ groups: Group[] }>("/channels/groups").then(r => {
+      setGroups(r.groups);
+      if (tab === "groups" && !selectedGroup && r.groups.length) setSelectedGroup(r.groups[0]!.channel_id);
+    }).catch(() => {});
+  }, [selectedGroup, tab]);
 
   useEffect(() => {
     reload();
+    reloadGroups();
     apiFetch<{ events: FeedItem[] }>("/signals/feed?limit=200").then(r => {
       const events = r.events ?? [];
       setFeed(events);
@@ -1103,6 +1127,12 @@ function FriendsPage() {
     }).catch(() => {});
   }, []);
 
+  useEffect(() => {
+    if (selectedGroup) {
+      apiFetch<{ members: GroupMember[] }>(`/channels/${selectedGroup}/members`).then(r => setGroupMembers(r.members)).catch(() => setGroupMembers([]));
+    }
+  }, [selectedGroup]);
+
   const handleAdd = async (username?: string) => {
     const name = (username ?? addVal).trim().replace(/^@/, "");
     if (!name) return;
@@ -1112,7 +1142,6 @@ function FriendsPage() {
       await apiFetch("/friends/add", { method: "POST", body: JSON.stringify({ username: name }) });
       setAddFeedback("sent");
       setAddVal("");
-      if (username) setRecAdded(true);
       reload();
       setTimeout(() => setAddFeedback("idle"), 2000);
     } catch (e: any) {
@@ -1129,135 +1158,282 @@ function FriendsPage() {
     } catch {}
   };
 
+  const handleCreateGroup = async () => {
+    setCreating(true);
+    try {
+      const r = await apiFetch<{ channel_id: string }>("/channels", { method: "POST", body: JSON.stringify({ name: createName.trim() || undefined }) });
+      setCreateName("");
+      reloadGroups();
+      setSelectedGroup(r.channel_id);
+    } catch {}
+    setCreating(false);
+  };
+
+  const handleInvite = async () => {
+    if (!selectedGroup || !inviteVal.trim()) return;
+    setInviteFb("sending");
+    try {
+      await apiFetch(`/channels/${selectedGroup}/invite`, { method: "POST", body: JSON.stringify({ username: inviteVal.trim().replace(/^@/, "") }) });
+      setInviteFb("sent");
+      setInviteVal("");
+      apiFetch<{ members: GroupMember[] }>(`/channels/${selectedGroup}/members`).then(r => setGroupMembers(r.members)).catch(() => {});
+      reloadGroups();
+      setTimeout(() => setInviteFb("idle"), 2000);
+    } catch {
+      setInviteFb("error");
+      setTimeout(() => setInviteFb("idle"), 2000);
+    }
+  };
+
+  const handleLeave = async (channelId: string) => {
+    if (!confirm(lang === "zh" ? "确定退出群组？" : "Leave this group?")) return;
+    try {
+      await apiFetch(`/channels/${channelId}/leave`, { method: "POST" });
+      setSelectedGroup(null);
+      reloadGroups();
+    } catch {}
+  };
+
+  const handleKick = async (channelId: string, addr: string, username: string | null) => {
+    if (!confirm(lang === "zh" ? `确定踢出 @${username ?? addr.slice(0, 8)}？` : `Kick @${username ?? addr.slice(0, 8)}?`)) return;
+    try {
+      await apiFetch(`/channels/${channelId}/kick`, { method: "POST", body: JSON.stringify({ address: addr }) });
+      apiFetch<{ members: GroupMember[] }>(`/channels/${channelId}/members`).then(r => setGroupMembers(r.members)).catch(() => {});
+      reloadGroups();
+    } catch {}
+  };
+
   const selectedFriend = friends.find(f => (f.friend_username ?? f.friend_address) === selected);
+  const activeGroup = groups.find(g => g.channel_id === selectedGroup);
 
   return (
     <div className="d-page active" style={{ display: "flex", flexDirection: "column" }}>
       <div className="d-page-header" style={{ flexShrink: 0 }}>
         <div className="d-page-title">susurration / <strong>{t("friends.title")}</strong></div>
-        <div className="header-actions">
-          <span style={{ fontSize: 11, color: "var(--ink-faint)" }}>{friends.length} {t("friends.connected")}</span>
-        </div>
       </div>
-      <div className="page-inner-flex" style={{ display: "flex", flex: 1, overflow: "hidden" }}>
-        <div className="friends-list-col">
-          <div className="friends-list-header">
-            <div className="add-friend-row">
-              <span className="add-friend-prefix">@</span>
-              <input className="add-friend-input" type="text" placeholder={t("friends.addPlaceholder")} value={addVal} onChange={(e) => setAddVal(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleAdd()} />
-              <button className="add-btn" onClick={() => handleAdd()} disabled={addFeedback === "sending"} style={addFeedback === "sent" ? { color: "var(--green)" } : addFeedback === "error" ? { color: "var(--red)" } : undefined}>
-                {addFeedback === "sending" ? "…" : addFeedback === "sent" ? t("friends.sent") : addFeedback === "error" ? addError.slice(0, 20) : t("friends.add")}
-              </button>
+      {/* Tab switcher */}
+      <div style={{ display: "flex", gap: 0, borderBottom: "0.5px solid var(--border-base)", flexShrink: 0, padding: "0 16px" }}>
+        <button onClick={() => setTab("friends")} style={{ background: "none", border: "none", borderBottom: tab === "friends" ? "1.5px solid var(--ink)" : "1.5px solid transparent", padding: "8px 16px", fontSize: 12, fontFamily: "var(--mono)", color: tab === "friends" ? "var(--ink)" : "var(--ink-faint)", cursor: "pointer", letterSpacing: "0.3px" }}>
+          {t("friends.friendsLabel")} ({friends.length})
+        </button>
+        <button onClick={() => setTab("groups")} style={{ background: "none", border: "none", borderBottom: tab === "groups" ? "1.5px solid var(--ink)" : "1.5px solid transparent", padding: "8px 16px", fontSize: 12, fontFamily: "var(--mono)", color: tab === "groups" ? "var(--ink)" : "var(--ink-faint)", cursor: "pointer", letterSpacing: "0.3px" }}>
+          {t("groups.label")} ({groups.length})
+        </button>
+      </div>
+      {tab === "friends" && (
+        <div className="page-inner-flex" style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+          <div className="friends-list-col">
+            <div className="friends-list-header">
+              <div className="add-friend-row">
+                <span className="add-friend-prefix">@</span>
+                <input className="add-friend-input" type="text" placeholder={t("friends.addPlaceholder")} value={addVal} onChange={(e) => setAddVal(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleAdd()} />
+                <button className="add-btn" onClick={() => handleAdd()} disabled={addFeedback === "sending"} style={addFeedback === "sent" ? { color: "var(--green)" } : addFeedback === "error" ? { color: "var(--red)" } : undefined}>
+                  {addFeedback === "sending" ? "…" : addFeedback === "sent" ? t("friends.sent") : addFeedback === "error" ? addError.slice(0, 20) : t("friends.add")}
+                </button>
+              </div>
+              {!friends.some(f => f.friend_username === "demo") && (
+                <>
+                  <div className="friends-section-label" style={{ marginBottom: 6 }}>{t("friends.recommended")}</div>
+                  <div className="rec-friend-card">
+                    <div className="friend-avatar" style={{ color: "var(--green)" }}>D</div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 12, color: "var(--ink)" }}>@demo</div>
+                      <div style={{ fontSize: 10, color: "var(--ink-faint)", marginTop: 2, lineHeight: 1.4 }}>{t("friends.recDesc")}</div>
+                    </div>
+                    <button className="add-btn" onClick={() => handleAdd("demo")} style={{ flexShrink: 0 }}>{t("friends.add")}</button>
+                  </div>
+                </>
+              )}
+              {requests.length > 0 && (
+                <>
+                  <div className="friends-section-label" style={{ marginBottom: 6 }}>{t("friends.pending")} ({requests.length})</div>
+                  <div className="pending-list">
+                    {requests.map(r => (
+                      <div className="pending-item" key={r.request_id}>
+                        <span className="p-handle">@{r.from_username ?? r.from_addr.slice(0, 8)}</span>
+                        <div className="p-actions">
+                          <button className="p-acc" onClick={() => handleAccept(r.from_username ?? r.from_addr)}>{t("friends.accept")}</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
             </div>
-            {!recAdded && (
-              <>
-                <div className="friends-section-label" style={{ marginBottom: 6 }}>{t("friends.recommended")}</div>
-                <div className="rec-friend-card">
-                  <div className="friend-avatar" style={{ color: "var(--green)" }}>D</div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 12, color: "var(--ink)" }}>@demo</div>
-                    <div style={{ fontSize: 10, color: "var(--ink-faint)", marginTop: 2, lineHeight: 1.4 }}>{t("friends.recDesc")}</div>
+            <div className="friends-list-scroll">
+              {friends.length === 0 && (
+                <div style={{ padding: "24px 16px", fontSize: 12, color: "var(--ink-faint)", textAlign: "center" }}>{t("friends.noFriends")}</div>
+              )}
+              {friends.map((f) => {
+                const handle = f.friend_username ?? f.friend_address.slice(0, 8);
+                const avatar = (f.friend_username || f.friend_address)[0]!.toUpperCase();
+                return (
+                  <div key={f.friend_address} className={`friend-item ${selected === handle ? "selected" : ""}`} onClick={() => setSelected(handle)}>
+                    <div className="friend-avatar">{avatar}</div>
+                    <div className="friend-info">
+                      <div className="friend-handle">@{handle}</div>
+                      <div className="friend-last">{timeAgo(f.created_at, lang)}</div>
+                    </div>
                   </div>
-                  <button className="add-btn" onClick={() => handleAdd("demo")} style={{ flexShrink: 0 }}>{t("friends.add")}</button>
-                </div>
-              </>
-            )}
-            {recAdded && (
-              <>
-                <div className="friends-section-label" style={{ marginBottom: 6 }}>{t("friends.recommended")}</div>
-                <div className="rec-friend-card" style={{ opacity: 0.6 }}>
-                  <div className="friend-avatar" style={{ color: "var(--green)" }}>D</div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 12, color: "var(--ink)" }}>@demo</div>
-                    <div style={{ fontSize: 10, color: "var(--ink-faint)", marginTop: 2, lineHeight: 1.4 }}>{t("friends.recDesc")}</div>
-                  </div>
-                  <span style={{ fontSize: 11, color: "var(--green)", flexShrink: 0 }}>{t("friends.added")}</span>
-                </div>
-              </>
-            )}
-            {requests.length > 0 && (
-              <>
-                <div className="friends-section-label" style={{ marginBottom: 6 }}>{t("friends.pending")} ({requests.length})</div>
-                <div className="pending-list">
-                  {requests.map(r => (
-                    <div className="pending-item" key={r.request_id}>
-                      <span className="p-handle">@{r.from_username ?? r.from_addr.slice(0, 8)}</span>
-                      <div className="p-actions">
-                        <button className="p-acc" onClick={() => handleAccept(r.from_username ?? r.from_addr)}>{t("friends.accept")}</button>
-                        <button className="p-dec">{t("friends.decline")}</button>
+                );
+              })}
+            </div>
+          </div>
+          {selectedFriend && (() => {
+            const friendHandle = selectedFriend.friend_username ?? selectedFriend.friend_address.slice(0, 8);
+            const d30 = Date.now() - 30 * 86400000;
+            const friendSignals = feed.filter(f => f.kind === "signal" && (f.from_username === friendHandle) && new Date(f.created_at).getTime() > d30);
+            const friendSignalIds = new Set(friendSignals.map(f => f.signal_id).filter(Boolean));
+            const myReactions = feed.filter(f => f.kind === "reaction" && f.from_address === auth.address && f.parent_signal_id != null && friendSignalIds.has(f.parent_signal_id));
+            const acceptCount = myReactions.filter(r => r.payload?.value === "+1").length;
+            const acceptRate = friendSignals.length > 0 ? Math.round((acceptCount / friendSignals.length) * 100) : 0;
+
+            const rawPositions = auth.address ? buildPositions(feed.filter(f => (f.kind === "signal" && f.from_username === friendHandle) || (f.kind === "reaction" && f.from_address === auth.address)), auth.address) : [];
+            const friendPositions = Object.keys(prices).length > 0 ? applyPrices(rawPositions, prices) : rawPositions;
+            const friendPnl = friendPositions.reduce((s, p) => s + (p.pnlUsd ?? 0), 0);
+
+            return (
+              <div className="friends-detail-col">
+                <div className="friend-profile-card">
+                  <div className="friend-profile-top">
+                    <div className="friend-avatar-lg">{(selectedFriend.friend_username || selectedFriend.friend_address)[0]!.toUpperCase()}</div>
+                    <div>
+                      <div className="friend-name">@{friendHandle}</div>
+                      <div className="friend-sub" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        {t("friends.addedOn")} {new Date(selectedFriend.created_at).toLocaleDateString()}
                       </div>
                     </div>
-                  ))}
-                </div>
-              </>
-            )}
-            <div className="friends-section-label">{t("friends.friendsLabel")} ({friends.length})</div>
-          </div>
-          <div className="friends-list-scroll">
-            {friends.length === 0 && (
-              <div style={{ padding: "24px 16px", fontSize: 12, color: "var(--ink-faint)", textAlign: "center" }}>{t("friends.noFriends")}</div>
-            )}
-            {friends.map((f) => {
-              const handle = f.friend_username ?? f.friend_address.slice(0, 8);
-              const avatar = (f.friend_username || f.friend_address)[0]!.toUpperCase();
-              return (
-                <div key={f.friend_address} className={`friend-item ${selected === handle ? "selected" : ""}`} onClick={() => setSelected(handle)}>
-                  <div className="friend-avatar">{avatar}</div>
-                  <div className="friend-info">
-                    <div className="friend-handle">@{handle}</div>
-                    <div className="friend-last">{timeAgo(f.created_at, lang)}</div>
                   </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-        {selectedFriend && (() => {
-          const friendHandle = selectedFriend.friend_username ?? selectedFriend.friend_address.slice(0, 8);
-          const d30 = Date.now() - 30 * 86400000;
-          const friendSignals = feed.filter(f => f.kind === "signal" && (f.from_username === friendHandle) && new Date(f.created_at).getTime() > d30);
-          const friendSignalIds = new Set(friendSignals.map(f => f.signal_id).filter(Boolean));
-          const myReactions = feed.filter(f => f.kind === "reaction" && f.from_address === auth.address && f.parent_signal_id != null && friendSignalIds.has(f.parent_signal_id));
-          const acceptCount = myReactions.filter(r => r.payload?.value === "+1").length;
-          const acceptRate = friendSignals.length > 0 ? Math.round((acceptCount / friendSignals.length) * 100) : 0;
-
-          const rawPositions = auth.address ? buildPositions(feed.filter(f => (f.kind === "signal" && f.from_username === friendHandle) || (f.kind === "reaction" && f.from_address === auth.address)), auth.address) : [];
-          const friendPositions = Object.keys(prices).length > 0 ? applyPrices(rawPositions, prices) : rawPositions;
-          const friendPnl = friendPositions.reduce((s, p) => s + (p.pnlUsd ?? 0), 0);
-
-          return (
-            <div className="friends-detail-col">
-              <div className="friend-profile-card">
-                <div className="friend-profile-top">
-                  <div className="friend-avatar-lg">{(selectedFriend.friend_username || selectedFriend.friend_address)[0]!.toUpperCase()}</div>
-                  <div>
-                    <div className="friend-name">@{friendHandle}</div>
-                    <div className="friend-sub" style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                      {t("friends.addedOn")} {new Date(selectedFriend.created_at).toLocaleDateString()}
+                  <div className="friend-stats-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 0, marginTop: 16, borderTop: "0.5px solid var(--border-base)", paddingTop: 12 }}>
+                    <div className="friend-stat-cell" style={{ textAlign: "center", borderRight: "0.5px solid var(--border-base)" }}>
+                      <div style={{ fontSize: 16, fontWeight: 600, color: "var(--ink)" }}>{friendSignals.length}</div>
+                      <div style={{ fontSize: 10, color: "var(--ink-faint)", marginTop: 2 }}>{t("friends.30dSignals")}</div>
+                    </div>
+                    <div className="friend-stat-cell" style={{ textAlign: "center", borderRight: "0.5px solid var(--border-base)" }}>
+                      <div style={{ fontSize: 16, fontWeight: 600, color: "var(--ink)" }}>{acceptRate}%</div>
+                      <div style={{ fontSize: 10, color: "var(--ink-faint)", marginTop: 2 }}>{t("friends.acceptRate")}</div>
+                    </div>
+                    <div className="friend-stat-cell" style={{ textAlign: "center" }}>
+                      <div style={{ fontSize: 16, fontWeight: 600, color: friendPnl > 0 ? "#4caf50" : friendPnl < 0 ? "#ef5350" : "var(--ink-faint)" }}>
+                        {friendPnl !== 0 ? `${friendPnl > 0 ? "+" : ""}$${Math.abs(friendPnl).toFixed(2)}` : "—"}
+                      </div>
+                      <div style={{ fontSize: 10, color: "var(--ink-faint)", marginTop: 2 }}>{t("friends.pnl")}</div>
                     </div>
                   </div>
-                </div>
-                <div className="friend-stats-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 0, marginTop: 16, borderTop: "0.5px solid var(--border-base)", paddingTop: 12 }}>
-                  <div className="friend-stat-cell" style={{ textAlign: "center", borderRight: "0.5px solid var(--border-base)" }}>
-                    <div style={{ fontSize: 16, fontWeight: 600, color: "var(--ink)" }}>{friendSignals.length}</div>
-                    <div style={{ fontSize: 10, color: "var(--ink-faint)", marginTop: 2 }}>{t("friends.30dSignals")}</div>
-                  </div>
-                  <div className="friend-stat-cell" style={{ textAlign: "center", borderRight: "0.5px solid var(--border-base)" }}>
-                    <div style={{ fontSize: 16, fontWeight: 600, color: "var(--ink)" }}>{acceptRate}%</div>
-                    <div style={{ fontSize: 10, color: "var(--ink-faint)", marginTop: 2 }}>{t("friends.acceptRate")}</div>
-                  </div>
-                  <div className="friend-stat-cell" style={{ textAlign: "center" }}>
-                    <div style={{ fontSize: 16, fontWeight: 600, color: friendPnl > 0 ? "#4caf50" : friendPnl < 0 ? "#ef5350" : "var(--ink-faint)" }}>
-                      {friendPnl !== 0 ? `${friendPnl > 0 ? "+" : ""}$${Math.abs(friendPnl).toFixed(2)}` : "—"}
-                    </div>
-                    <div style={{ fontSize: 10, color: "var(--ink-faint)", marginTop: 2 }}>{t("friends.pnl")}</div>
+                  <div style={{ marginTop: 16, borderTop: "0.5px solid var(--border-base)", paddingTop: 12, textAlign: "center" }}>
+                    <button
+                      style={{ fontSize: 11, color: "var(--red)", background: "none", border: "0.5px solid var(--border2)", padding: "4px 14px", cursor: "pointer", borderRadius: 3, fontFamily: "var(--mono)", letterSpacing: "0.3px" }}
+                      disabled={removingFriend === friendHandle}
+                      onClick={() => {
+                        if (!confirm(lang === "zh" ? `确定删除 @${friendHandle}？` : `Remove @${friendHandle}?`)) return;
+                        setRemovingFriend(friendHandle);
+                        apiFetch("/friends/remove", { method: "POST", body: JSON.stringify({ username: friendHandle }) })
+                          .then(() => { setSelected(null); reload(); })
+                          .catch(() => {})
+                          .finally(() => setRemovingFriend(null));
+                      }}
+                    >
+                      {removingFriend === friendHandle ? "…" : lang === "zh" ? "删除好友" : "Remove"}
+                    </button>
                   </div>
                 </div>
               </div>
+            );
+          })()}
+        </div>
+      )}
+      {tab === "groups" && (
+        <div className="page-inner-flex" style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+          <div className="friends-list-col">
+            <div className="friends-list-header">
+              <div className="add-friend-row">
+                <input className="add-friend-input" type="text" placeholder={t("groups.namePlaceholder")} value={createName} onChange={(e) => setCreateName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleCreateGroup()} style={{ paddingLeft: 10 }} />
+                <button className="add-btn" onClick={handleCreateGroup} disabled={creating}>
+                  {creating ? t("groups.creating") : t("groups.create")}
+                </button>
+              </div>
             </div>
-          );
-        })()}
-      </div>
+            <div className="friends-list-scroll">
+              {groups.length === 0 && (
+                <div style={{ padding: "24px 16px", fontSize: 12, color: "var(--ink-faint)", textAlign: "center" }}>{t("groups.noGroups")}</div>
+              )}
+              {groups.map((g) => {
+                const name = g.name || t("groups.unnamed");
+                const avatar = (g.name || g.channel_id)[0]!.toUpperCase();
+                return (
+                  <div key={g.channel_id} className={`friend-item ${selectedGroup === g.channel_id ? "selected" : ""}`} onClick={() => setSelectedGroup(g.channel_id)}>
+                    <div className="friend-avatar">{avatar}</div>
+                    <div className="friend-info">
+                      <div className="friend-handle" style={!g.name ? { color: "var(--ink-faint)", fontStyle: "italic" } : undefined}>{name}</div>
+                      <div className="friend-last">{g.member_count} {g.member_count === 1 ? t("groups.member") : t("groups.members")}</div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          {activeGroup && (
+            <div className="friends-detail-col">
+              <div className="friend-profile-card">
+                <div className="friend-profile-top">
+                  <div className="friend-avatar-lg">{(activeGroup.name || activeGroup.channel_id)[0]!.toUpperCase()}</div>
+                  <div>
+                    <div className="friend-name" style={!activeGroup.name ? { color: "var(--ink-faint)", fontStyle: "italic" } : undefined}>{activeGroup.name || t("groups.unnamed")}</div>
+                    <div className="friend-sub">{activeGroup.member_count} {activeGroup.member_count === 1 ? t("groups.member") : t("groups.members")} · {new Date(activeGroup.created_at).toLocaleDateString()}</div>
+                  </div>
+                </div>
+                {/* Invite row */}
+                {activeGroup.owner === auth.address ? (
+                  <div style={{ display: "flex", gap: 6, marginTop: 16, borderTop: "0.5px solid var(--border-base)", paddingTop: 12 }}>
+                    <span style={{ color: "var(--ink-faint)", fontSize: 12, lineHeight: "28px" }}>@</span>
+                    <input type="text" placeholder={t("groups.invitePlaceholder")} value={inviteVal} onChange={(e) => setInviteVal(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleInvite()} style={{ flex: 1, background: "var(--surface)", border: "0.5px solid var(--border-base)", borderRadius: 6, padding: "4px 8px", fontSize: 12, fontFamily: "var(--mono)", color: "var(--ink)", outline: "none" }} />
+                    <button className="add-btn" onClick={handleInvite} disabled={inviteFb === "sending"} style={inviteFb === "sent" ? { color: "var(--green)" } : inviteFb === "error" ? { color: "var(--red)" } : undefined}>
+                      {inviteFb === "sending" ? t("groups.inviting") : inviteFb === "sent" ? t("groups.invited") : t("groups.invite")}
+                    </button>
+                  </div>
+                ) : (
+                  <div style={{ marginTop: 16, borderTop: "0.5px solid var(--border-base)", paddingTop: 10, fontSize: 11, color: "var(--ink-faint)", fontStyle: "italic" }}>
+                    {t("groups.ownerCanInvite")}
+                  </div>
+                )}
+                {/* Members list */}
+                <div style={{ marginTop: 16, borderTop: "0.5px solid var(--border-base)", paddingTop: 12 }}>
+                  {groupMembers.map(m => {
+                    const handle = m.username ?? m.address.slice(0, 8);
+                    const isOwner = m.address === activeGroup.owner;
+                    const isMe = m.address === auth.address;
+                    const iAmOwner = activeGroup.owner === auth.address;
+                    return (
+                      <div key={m.address} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "0.5px solid var(--border-base)" }}>
+                        <div className="friend-avatar" style={{ width: 24, height: 24, fontSize: 10, lineHeight: "24px" }}>{(m.username || m.address)[0]!.toUpperCase()}</div>
+                        <div style={{ flex: 1, fontSize: 12, fontFamily: "var(--mono)", color: "var(--ink)" }}>
+                          @{handle}
+                          {isOwner && <span style={{ marginLeft: 6, fontSize: 10, color: "var(--ink-faint)" }}>({t("groups.owner")})</span>}
+                          {isMe && <span style={{ marginLeft: 6, fontSize: 10, color: "var(--ink-faint)" }}>({t("groups.you")})</span>}
+                        </div>
+                        {iAmOwner && !isMe && (
+                          <button onClick={() => handleKick(activeGroup.channel_id, m.address, m.username)} style={{ fontSize: 11, color: "var(--red)", background: "none", border: "0.5px solid var(--border2)", padding: "2px 8px", cursor: "pointer", borderRadius: 4, fontFamily: "var(--mono)", letterSpacing: "0.3px" }}>
+                            {t("groups.kick")}
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                {/* Leave button */}
+                <div style={{ marginTop: 16, borderTop: "0.5px solid var(--border-base)", paddingTop: 12, textAlign: "center" }}>
+                  <button
+                    onClick={() => handleLeave(activeGroup.channel_id)}
+                    style={{ fontSize: 11, color: "var(--red)", background: "none", border: "0.5px solid var(--border2)", padding: "4px 14px", cursor: "pointer", borderRadius: 4, fontFamily: "var(--mono)", letterSpacing: "0.3px" }}
+                  >
+                    {t("groups.leave")}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -1298,6 +1474,15 @@ function SettingsPage({ onShowOnboarding }: { onShowOnboarding: () => void }) {
         </div>
         <div className="settings-section">
           <div className="settings-section-title">{t("settings.agentConn")}</div>
+          <div className="settings-row">
+            <div className="settings-row-left">
+              <div className="settings-row-key">MCP Adapter</div>
+              <div className="settings-row-val">{(() => {
+                if (!whoami?.last_mcp_ping_at) return <span style={{ color: "var(--ink-faint)" }}>never connected</span>;
+                return <span style={{ color: "var(--green)" }}>ok · {timeAgo(whoami.last_mcp_ping_at)}</span>;
+              })()}</div>
+            </div>
+          </div>
           <div className="settings-row">
             <div className="settings-row-left"><div className="settings-row-key">{t("settings.reconnect")}</div></div>
             <div className="settings-row-right"><button className="d-btn d-btn-ghost" style={{ fontSize: 11, padding: "4px 10px" }} onClick={onShowOnboarding}>{t("settings.reconfigure")}</button></div>
@@ -1488,7 +1673,13 @@ function ModeDocSection() {
 // ════════════════════════════════════════════════════════
 export function DashboardPage() {
   const [showOnboarding, setShowOnboarding] = useState(() => !localStorage.getItem("susu_token"));
-  const [page, setPage] = useState<Page>("dashboard");
+  const [page, setPage] = useState<Page>(() => {
+    const saved = localStorage.getItem("susu_page") as Page | null;
+    return saved && ["dashboard", "feed", "friends", "mode", "settings"].includes(saved) ? saved : "dashboard";
+  });
+  const setPagePersist = useCallback((p: Page) => { localStorage.setItem("susu_page", p); setPage(p); }, []);
+  const [visited, setVisited] = useState<Set<Page>>(() => new Set([page]));
+  useEffect(() => { setVisited(v => v.has(page) ? v : new Set(v).add(page)); }, [page]);
 
   const authCtx: AuthCtx = {
     token: localStorage.getItem("susu_token"),
@@ -1498,16 +1689,16 @@ export function DashboardPage() {
 
   return (
     <AuthContext.Provider value={authCtx}>
-      <NavContext.Provider value={setPage}>
+      <NavContext.Provider value={setPagePersist}>
         <div className="dash-shell">
           {showOnboarding && <Onboarding onComplete={() => setShowOnboarding(false)} />}
-          <Sidebar page={page} setPage={setPage} />
+          <Sidebar page={page} setPage={setPagePersist} />
           <div className="dash-content">
-            {page === "dashboard" && <DashHome />}
-            {page === "feed" && <FeedPage />}
-            {page === "friends" && <FriendsPage />}
-            {page === "mode" && <ModePage />}
-            {page === "settings" && <SettingsPage onShowOnboarding={() => setShowOnboarding(true)} />}
+            {visited.has("dashboard") && <div style={{ display: page === "dashboard" ? "flex" : "none", flexDirection: "column", height: "100%" }}><DashHome /></div>}
+            {visited.has("feed") && <div style={{ display: page === "feed" ? "flex" : "none", flexDirection: "column", height: "100%" }}><FeedPage /></div>}
+            {visited.has("friends") && <div style={{ display: page === "friends" ? "flex" : "none", flexDirection: "column", height: "100%" }}><FriendsPage /></div>}
+            {visited.has("mode") && <div style={{ display: page === "mode" ? "flex" : "none", flexDirection: "column", height: "100%" }}><ModePage /></div>}
+            {visited.has("settings") && <div style={{ display: page === "settings" ? "flex" : "none", flexDirection: "column", height: "100%" }}><SettingsPage onShowOnboarding={() => setShowOnboarding(true)} /></div>}
           </div>
         </div>
       </NavContext.Provider>
