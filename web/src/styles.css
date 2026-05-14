@@ -37,6 +37,13 @@
   --blue:       #3b82f6;
   --blue-d:     rgba(59, 130, 246, 0.12);
 
+  /* Brand accent — cold-blue signature, used sparingly:
+     focus ring · active nav · primary CTA · active filter chip */
+  --accent:     #7aa2f7;
+  --accent-hover: #8bb3ff;
+  --accent-d:   rgba(122, 162, 247, 0.12);
+  --accent-border: rgba(122, 162, 247, 0.30);
+
   /* Syntax-highlight tokens — Tokyo-Night-inspired, picked to read
      comfortably on the deep blue-black background. */
   --tok-cmd:     #7aa2f7;   /* shell command name (`npx`, `susu`) */
@@ -75,6 +82,7 @@ body {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
+  overflow-x: hidden;
 }
 
 /* nav */
@@ -115,9 +123,10 @@ body {
   cursor: pointer;
   letter-spacing: 0.5px;
   transition: color 150ms, border-color 150ms;
-  border-radius: 3px;
+  border-radius: 4px;
 }
 .lang-toggle:hover { color: var(--ink); border-color: var(--ink-faint); }
+.lang-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* hero */
 .landing-main {
@@ -170,7 +179,7 @@ body {
 }
 
 @keyframes whisper-breathe {
-  0%, 100% { opacity: 0.5; }
+  0%, 100% { opacity: 0.75; }
   50%      { opacity: 1; }
 }
 
@@ -228,22 +237,25 @@ body {
   letter-spacing: 1px;
   text-decoration: none;
   padding: 12px 22px;
-  border: 0.5px solid var(--ink);
-  color: var(--ink);
-  background: transparent;
+  border: 0.5px solid var(--accent);
+  color: var(--paper);
+  background: var(--accent);
   cursor: pointer;
-  transition: all 120ms ease;
+  transition: all 150ms ease;
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  border-radius: 6px;
 }
 
 .landing-btn:hover {
-  background: var(--ink);
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
   color: var(--paper);
 }
 
 .landing-btn.subtle {
+  background: transparent;
   border-color: transparent;
   color: var(--ink-soft);
   padding-left: 8px;
@@ -321,9 +333,9 @@ body {
 
 .copy-box {
   border: 0.5px solid var(--ink-trace);
-  /* Slightly lighter than --paper so the box visually lifts off the page bg.
-     Stays within the cold blue-black palette. */
   background: #11161f;
+  border-radius: 6px;
+  overflow: hidden;
 }
 
 .copy-box-label {
@@ -549,7 +561,7 @@ body {
 .docs-pre {
   background: var(--ink);
   color: var(--paper);
-  border-radius: 8px;
+  border-radius: 6px;
   padding: 18px 20px;
   font-family: var(--mono);
   font-size: 12px;
@@ -785,4 +797,463 @@ pre {
 
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   LANDING PAGE V3 — redesigned marketing page
+   ═══════════════════════════════════════════════════════════════ */
+
+html { scroll-behavior: smooth; }
+
+/* ─── Nav (fixed + blur) ─── */
+.l-nav {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 40px;
+  font-size: 12px;
+  letter-spacing: 0.5px;
+  background: linear-gradient(to bottom, rgba(11,15,26,0.95) 60%, transparent 100%);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.l-brand {
+  font-weight: 500;
+  font-size: 13px;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.l-nav-right {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
+.l-nav-right a {
+  color: var(--ink-soft);
+  text-decoration: none;
+  transition: color 150ms;
+  font-size: 12px;
+}
+
+.l-nav-right a:hover { color: var(--ink); }
+
+/* ─── Hero (split screen) ─── */
+.l-hero {
+  min-height: 100dvh;
+  display: grid;
+  grid-template-columns: 1fr 1.2fr;
+  align-items: center;
+  gap: 60px;
+  padding: 100px 40px 80px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.l-hero-left {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.l-hero-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  letter-spacing: 1px;
+}
+
+.l-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  animation: l-pulse-dot 2s ease-in-out infinite;
+}
+
+@keyframes l-pulse-dot {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+.l-beta {
+  font-size: 10px;
+  letter-spacing: 1px;
+  padding: 2px 7px;
+  border: 0.5px solid var(--whisper);
+  color: var(--whisper);
+}
+
+.l-open-src {
+  color: var(--ink-faint);
+  font-size: 11px;
+}
+
+.l-hero h1 {
+  font-size: clamp(30px, 4vw, 48px);
+  font-weight: 500;
+  line-height: 1.12;
+  letter-spacing: -1.2px;
+  color: var(--ink);
+}
+
+.l-hl { color: var(--accent); }
+
+.l-hero-sub {
+  font-size: 14px;
+  color: var(--ink-soft);
+  line-height: 1.7;
+  max-width: 460px;
+}
+
+.l-hero-actions {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.l-cta-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 28px;
+  background: var(--accent);
+  color: var(--paper);
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 500;
+  text-decoration: none;
+  border-radius: 6px;
+  letter-spacing: 0.5px;
+  transition: all 150ms;
+}
+
+.l-cta-primary:hover {
+  background: var(--accent-hover);
+  transform: translateY(-1px);
+}
+
+.l-cta-primary:active {
+  transform: translateY(0) scale(0.98);
+}
+
+.l-cta-secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 20px;
+  background: transparent;
+  border: 0.5px solid var(--border2);
+  color: var(--ink-soft);
+  font-family: var(--mono);
+  font-size: 12px;
+  text-decoration: none;
+  border-radius: 6px;
+  letter-spacing: 0.3px;
+  transition: all 150ms;
+}
+
+.l-cta-secondary:hover {
+  border-color: var(--ink-faint);
+  color: var(--ink);
+}
+
+.l-hero-note {
+  font-size: 11px;
+  color: var(--ink-faint);
+  line-height: 1.6;
+}
+
+/* ─── Terminal ─── */
+.l-hero-right { position: relative; }
+
+.l-terminal {
+  width: 100%;
+  background: var(--surface);
+  border: 0.5px solid var(--border-base);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.l-terminal-chrome {
+  display: flex;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 0.5px solid var(--border-base);
+  gap: 6px;
+}
+
+.l-terminal-chrome .l-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  background: rgba(165,180,199,0.1);
+}
+
+.l-terminal-title {
+  margin: 0 auto;
+  font-size: 11px;
+  color: var(--ink-faint);
+  letter-spacing: 0.5px;
+}
+
+.l-terminal-body {
+  padding: 20px 24px 28px;
+  font-size: 12px;
+  line-height: 1.8;
+  min-height: 380px;
+  max-height: 480px;
+  overflow-y: hidden;
+  position: relative;
+}
+
+.l-term-line {
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 0.4s ease, transform 0.4s ease;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.l-term-line.visible { opacity: 1; transform: translateY(0); }
+.l-term-line.l-spacer { height: 10px; }
+
+/* Terminal syntax tokens */
+.t-dim    { color: var(--ink-soft); }
+.t-faint  { color: var(--ink-faint); }
+.t-accent { color: var(--accent); }
+.t-handle { color: var(--tok-handle); }
+.t-green  { color: var(--green); }
+.t-red    { color: var(--red); }
+.t-str    { color: var(--tok-str); }
+.t-num    { color: var(--tok-num); }
+.t-cmd    { color: var(--tok-cmd); }
+.t-bold   { font-weight: 500; }
+
+/* Scene tabs */
+.l-scene-tabs {
+  display: flex;
+  gap: 2px;
+  margin-top: 8px;
+}
+
+.l-scene-tab {
+  flex: 1;
+  padding: 8px 12px;
+  background: transparent;
+  border: 0.5px solid var(--border-base);
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-faint);
+  transition: all 200ms;
+  text-align: center;
+}
+
+.l-scene-tab:hover { color: var(--ink-soft); border-color: var(--border2); }
+
+.l-scene-tab.active {
+  color: var(--accent);
+  border-color: var(--accent-border);
+  background: var(--accent-d);
+}
+
+.l-scene-progress {
+  height: 2px;
+  background: var(--accent);
+  opacity: 0.4;
+  transition: width 0.3s linear;
+  border-radius: 1px;
+}
+
+/* ─── Section commons ─── */
+.l-section {
+  padding: 120px 40px;
+  max-width: 1000px;
+  margin: 0 auto;
+}
+
+.l-section-label {
+  font-size: 11px;
+  letter-spacing: 2px;
+  color: var(--ink-faint);
+  text-transform: uppercase;
+  margin-bottom: 16px;
+}
+
+.l-section h2 {
+  font-size: clamp(24px, 3.2vw, 38px);
+  font-weight: 400;
+  line-height: 1.15;
+  letter-spacing: -0.6px;
+  margin-bottom: 48px;
+  color: var(--ink);
+}
+
+.l-divider {
+  height: 0.5px;
+  background: var(--ink-trace);
+  max-width: 1000px;
+  margin: 0 auto;
+}
+
+/* ─── 3-step ─── */
+.l-steps {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 40px;
+}
+
+.l-step {
+  border-top: 0.5px solid var(--border2);
+  padding-top: 24px;
+}
+
+.l-step-num {
+  font-size: 11px;
+  color: var(--accent);
+  letter-spacing: 1px;
+  margin-bottom: 14px;
+}
+
+.l-step h3 {
+  font-size: 14px;
+  font-weight: 500;
+  margin-bottom: 10px;
+  color: var(--ink);
+}
+
+.l-step p {
+  font-size: 13px;
+  color: var(--ink-soft);
+  line-height: 1.7;
+}
+
+/* ─── Features ─── */
+.l-features-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.l-feature-item {
+  display: grid;
+  grid-template-columns: 32px 200px 1fr;
+  align-items: baseline;
+  gap: 16px;
+  padding: 22px 0;
+  border-bottom: 0.5px solid var(--ink-trace);
+}
+
+.l-feature-num { font-size: 11px; color: var(--ink-faint); }
+.l-feature-item h3 { font-size: 14px; font-weight: 500; color: var(--ink); }
+.l-feature-item p { font-size: 13px; color: var(--ink-soft); line-height: 1.6; }
+
+/* ─── Trust ─── */
+.l-trust-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 32px;
+}
+
+.l-trust-item {
+  border-top: 0.5px solid var(--border2);
+  padding-top: 20px;
+}
+
+.l-trust-item h3 { font-size: 14px; font-weight: 500; color: var(--ink); margin-bottom: 8px; }
+.l-trust-item p { font-size: 13px; color: var(--ink-soft); line-height: 1.6; }
+
+/* ─── Bottom CTA ─── */
+.l-bottom-cta {
+  padding: 100px 40px;
+  max-width: 1000px;
+  margin: 0 auto;
+}
+
+.l-bottom-cta h2 {
+  font-size: clamp(22px, 2.8vw, 34px);
+  font-weight: 400;
+  letter-spacing: -0.5px;
+  margin-bottom: 16px;
+  line-height: 1.2;
+  color: var(--ink);
+}
+
+.l-bottom-sub {
+  color: var(--ink-soft);
+  font-size: 13px;
+  margin-bottom: 32px;
+  line-height: 1.6;
+}
+
+/* ─── Footer ─── */
+.l-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 24px;
+  flex-wrap: wrap;
+  padding: 32px 40px;
+  font-size: 11px;
+  color: var(--ink-faint);
+  border-top: 0.5px solid var(--ink-trace);
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.l-footer-links { display: flex; gap: 20px; }
+.l-footer a { color: var(--ink-faint); text-decoration: none; transition: color 150ms; }
+.l-footer a:hover { color: var(--ink); }
+
+/* ─── Scroll reveal ─── */
+.l-fade-in {
+  opacity: 0;
+  transform: translateY(20px);
+  transition: opacity 0.6s ease, transform 0.6s ease;
+}
+.l-fade-in.visible { opacity: 1; transform: translateY(0); }
+
+/* ─── Landing V3 responsive ─── */
+@media (max-width: 900px) {
+  .l-hero {
+    grid-template-columns: 1fr;
+    gap: 36px;
+    padding: 80px 20px 48px;
+    min-height: auto;
+    max-width: 100%;
+    box-sizing: border-box;
+  }
+  .l-hero-left { order: 1; min-width: 0; }
+  .l-hero-right { order: 2; min-width: 0; }
+  .l-hero h1 { font-size: 22px; letter-spacing: -0.4px; overflow-wrap: break-word; }
+  .l-hero-sub { font-size: 13px; }
+  .l-terminal-body {
+    font-size: 10px;
+    padding: 14px 12px 20px;
+    min-height: 260px;
+    max-height: 320px;
+    overflow-x: auto;
+  }
+  .l-term-line { white-space: pre; word-break: normal; }
+  .l-nav { padding: 14px 16px; }
+  .l-nav-right { gap: 12px; }
+  .l-nav-right a.l-nav-section { display: none; }
+  .l-section { padding: 72px 20px; }
+  .l-steps { grid-template-columns: 1fr; gap: 24px; }
+  .l-feature-item { grid-template-columns: 1fr; gap: 4px; }
+  .l-feature-num { display: none; }
+  .l-trust-grid { grid-template-columns: 1fr; gap: 24px; }
+  .l-bottom-cta { padding: 60px 20px; }
+  .l-hero-actions { flex-direction: column; align-items: stretch; }
+  .l-cta-primary, .l-cta-secondary { justify-content: center; }
+  .l-footer { flex-direction: column; gap: 12px; padding: 24px 20px; }
+  .l-scene-tabs { flex-direction: column; gap: 4px; }
 }

@@ -224,6 +224,16 @@ identityRoutes.post("/identity/register", async (c) => {
   recordEvent({ type: "register", address: me, payload: { username } });
   void sql`INSERT INTO register_ips(ip, address) VALUES (${ip}, ${me})`.catch(() => {});
 
+  // v4: auto-add @demo as friend (server-side, not front-end button).
+  // Fire-and-forget — inserts welcome+replay signals so the user's daemon
+  // sees a complete eval→react loop on first SSE subscribe (via channel
+  // history backfill). Failures don't block register response.
+  void import("../lib/demo_setup.ts").then(({ ensureDemoFriend }) =>
+    ensureDemoFriend(me, username),
+  ).catch((err) => {
+    console.error(`[register] ensureDemoFriend failed for ${me.slice(0, 8)}…:`, err?.message ?? err);
+  });
+
   return c.json({ address: me, username });
 });
 

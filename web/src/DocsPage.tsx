@@ -32,13 +32,35 @@ export function DocsPage() {
             {t("docs.p2")}
           </p>
 
-          <pre className="copy-box-pre" style={{ padding: "12px 14px", border: "0.5px solid var(--ink-trace)" }}>
+          <pre className="copy-box-pre" style={{ padding: "12px 14px", border: "0.5px solid var(--ink-trace)", borderRadius: 6 }}>
 {`npm install -g susurration && susu doc`}
           </pre>
 
           <p style={{ color: "var(--ink-faint)", lineHeight: 1.7, marginTop: 24, fontSize: 13 }}>
             {t("docs.p3")}
           </p>
+
+          <h2 style={{ fontSize: 14, fontWeight: 500, color: "var(--ink)", marginTop: 40, marginBottom: 16, paddingBottom: 8, borderBottom: "0.5px solid var(--ink-trace)" }}>
+            {t("docs.quickref")}
+          </h2>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <pre className="copy-box-pre" style={{ padding: "10px 14px", border: "0.5px solid var(--ink-trace)", borderRadius: 6, fontSize: 12 }}>
+              <span className="tok-cmd">susu</span> <span className="tok-arg">register</span>{"          "}<span className="tok-punct"># {t("docs.cmd.register")}</span>
+            </pre>
+            <pre className="copy-box-pre" style={{ padding: "10px 14px", border: "0.5px solid var(--ink-trace)", borderRadius: 6, fontSize: 12 }}>
+              <span className="tok-cmd">susu</span> <span className="tok-arg">friends add</span> <span className="tok-handle">@alice</span>{"  "}<span className="tok-punct"># {t("docs.cmd.add")}</span>
+            </pre>
+            <pre className="copy-box-pre" style={{ padding: "10px 14px", border: "0.5px solid var(--ink-trace)", borderRadius: 6, fontSize: 12 }}>
+              <span className="tok-cmd">susu</span> <span className="tok-arg">push</span> <span className="tok-str">signal.json</span>{"      "}<span className="tok-punct"># {t("docs.cmd.push")}</span>
+            </pre>
+            <pre className="copy-box-pre" style={{ padding: "10px 14px", border: "0.5px solid var(--ink-trace)", borderRadius: 6, fontSize: 12 }}>
+              <span className="tok-cmd">susu</span> <span className="tok-arg">feed</span>{"                "}<span className="tok-punct"># {t("docs.cmd.feed")}</span>
+            </pre>
+            <pre className="copy-box-pre" style={{ padding: "10px 14px", border: "0.5px solid var(--ink-trace)", borderRadius: 6, fontSize: 12 }}>
+              <span className="tok-cmd">susu</span> <span className="tok-arg">whoami</span>{"              "}<span className="tok-punct"># {t("docs.cmd.whoami")}</span>
+            </pre>
+          </div>
 
           <p style={{ marginTop: 32 }}>
             <a href="/" className="landing-btn subtle">{t("docs.back")}</a>

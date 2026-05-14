@@ -7,7 +7,7 @@
 // @ts-ignore — Bun resolves JSON imports at bundle time
 import pkg from "../package.json";
 import { redactSecrets, redactSecretsDeep } from "../../shared/redact.ts";
-const DAEMON_VERSION: string = pkg.version ?? "unknown";
+export const DAEMON_VERSION: string = pkg.version ?? "unknown";
 
 export interface SusuClientConfig {
   api_url: string;
@@ -108,6 +108,33 @@ export function reportClientError(
       error_type: errorType,
       message: redactSecrets(message).slice(0, 500),
       context: context ? redactSecretsDeep(context) : context,
+    }),
+  }).catch(() => {});
+}
+
+/** Report daemon decision telemetry. Fire-and-forget — never throws.
+ *  Used to distinguish "silent daemon" (running but all noop) vs "dead daemon"
+ *  (not connected). Backend endpoint accepts every decision including noop. */
+export function reportDaemonDecision(
+  cfg: SusuClientConfig,
+  params: {
+    kind: "react" | "noop" | "push" | "error";
+    signal_id?: string;
+    event_kind?: string;
+    error_type?: string;
+    latency_ms?: number;
+    context?: Record<string, unknown>;
+  },
+): void {
+  void authedFetch(cfg, `/daemon/decision`, {
+    method: "POST",
+    body: JSON.stringify({
+      kind: params.kind,
+      ...(params.signal_id ? { signal_id: params.signal_id } : {}),
+      ...(params.event_kind ? { event_kind: params.event_kind } : {}),
+      ...(params.error_type ? { error_type: params.error_type } : {}),
+      ...(params.latency_ms != null ? { latency_ms: params.latency_ms } : {}),
+      context: { version: DAEMON_VERSION, ...(params.context ? redactSecretsDeep(params.context as Record<string, unknown>) : {}) },
     }),
   }).catch(() => {});
 }

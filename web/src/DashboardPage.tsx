@@ -64,6 +64,7 @@ function useAuth() { return useContext(AuthContext); }
 
 type Page = "dashboard" | "feed" | "friends" | "mode" | "settings";
 const NavContext = createContext<(p: Page) => void>(() => {});
+const ActivityBadgeContext = createContext<{ setHasNew: (v: boolean) => void }>({ setHasNew: () => {} });
 function useNav() { return useContext(NavContext); }
 
 async function apiFetch<T = any>(path: string, opts?: RequestInit): Promise<T> {
@@ -195,6 +196,9 @@ interface Position {
   exitReason?: string;
   exitPrice?: number;
   positionUsd: number;
+  /** v4 — replay signal opened a dry-run position. Visually separated and
+   *  excluded from totalPnl / totalCapital aggregates. */
+  isReplay?: boolean;
 }
 
 function normalizeSignalPayload(p: any): {
@@ -244,7 +248,7 @@ function buildPositions(feed: FeedItem[], myAddress: string): Position[] {
     const sl = norm.stopLoss ?? norm.entryPrice! * (isShort ? 1.08 : 0.92);
     const tp = norm.takeProfit ?? norm.entryPrice! * (isShort ? 0.88 : 1.12);
     const sizeFactor = typeof f.payload?.size_factor === "number" ? f.payload.size_factor : 0.7;
-    const positionUsd = 100 * 0.3 * sizeFactor;
+    const positionUsd = 1000 * 0.3 * sizeFactor;
 
     positions.push({
       token: norm.token!,
@@ -258,6 +262,7 @@ function buildPositions(feed: FeedItem[], myAddress: string): Position[] {
       openedAt: sig.created_at,
       status: "open",
       positionUsd,
+      isReplay: sig.payload?.replay === true,
     });
   }
   return positions;
@@ -266,10 +271,22 @@ function buildPositions(feed: FeedItem[], myAddress: string): Position[] {
 const TIME_STOP_MS = 48 * 60 * 60 * 1000; // 48h
 const TRAILING_STOP_THRESHOLD = 5; // activate after 5% profit
 const TRAILING_STOP_RETRACE = 0.5; // close when retraced 50% from peak
-const peakPnlMap = new Map<string, number>(); // signalId → highest pnlPct seen
+const peakPnlMap = new Map<string, number>();
 
-function applyPrices(positions: Position[], prices: Record<string, number>): Position[] {
-  return positions.map(pos => {
+interface CloseRecord { exit_reason: string; exit_price: number; exit_pnl_pct: number }
+
+function applyPrices(
+  positions: Position[],
+  prices: Record<string, number>,
+  persistedCloses: Map<string, CloseRecord>,
+): { positions: Position[] } {
+  const result = positions.map(pos => {
+    const stored = persistedCloses.get(pos.signalId);
+    if (stored) {
+      const cp = prices[pos.token];
+      return { ...pos, currentPrice: cp, pnlPct: stored.exit_pnl_pct, pnlUsd: (stored.exit_pnl_pct / 100) * pos.positionUsd, status: "closed" as const, exitReason: stored.exit_reason, exitPrice: stored.exit_price };
+    }
+
     const cp = prices[pos.token];
     if (cp === undefined) return pos;
 
@@ -279,7 +296,6 @@ function applyPrices(positions: Position[], prices: Record<string, number>): Pos
       : ((cp - pos.entryPrice) / pos.entryPrice) * 100 * pos.leverage;
     const pnlUsd = (pnlPct / 100) * pos.positionUsd;
 
-    // Time stop: close at market after 48h
     const ageMs = Date.now() - new Date(pos.openedAt).getTime();
     if (ageMs > TIME_STOP_MS) {
       peakPnlMap.delete(pos.signalId);
@@ -304,7 +320,6 @@ function applyPrices(positions: Position[], prices: Record<string, number>): Pos
       return { ...pos, currentPrice: cp, pnlPct: exitPnl, pnlUsd: (exitPnl / 100) * pos.positionUsd, status: "closed" as const, exitReason: "TP", exitPrice: pos.takeProfit };
     }
 
-    // Trailing stop: track peak PnL, close if retraced 50% from peak after threshold
     const prevPeak = peakPnlMap.get(pos.signalId) ?? 0;
     const newPeak = Math.max(prevPeak, pnlPct);
     peakPnlMap.set(pos.signalId, newPeak);
@@ -315,6 +330,8 @@ function applyPrices(positions: Position[], prices: Record<string, number>): Pos
 
     return { ...pos, currentPrice: cp, pnlPct, pnlUsd, status: "open" as const };
   });
+
+  return { positions: result };
 }
 
 function validateHandle(v: string) {
@@ -379,6 +396,30 @@ function CopyBtn({ text, className }: { text: string; className?: string }) {
   );
 }
 
+// ── Awaiting signal card — shown when user has friends but no signal today ──
+function AwaitingSignalCard() {
+  const { t } = useLang();
+  return (
+    <div className="awaiting-card">
+      <div className="awaiting-header">
+        <span className="awaiting-title">{t("dash.awaitingTitle")}</span>
+      </div>
+      <div className="awaiting-desc">{t("dash.awaitingDesc")}</div>
+      <div className="awaiting-skeleton" aria-hidden>
+        {[0, 1, 2].map(i => (
+          <div className="awaiting-skel-row" key={i}>
+            <span className="skel-cell skel-w-token" />
+            <span className="skel-cell skel-w-dir" />
+            <span className="skel-cell skel-w-price" />
+            <span className="skel-cell skel-w-pnl" />
+            <span className="skel-cell skel-w-reason" />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ── Signal card (shared between dashboard + feed) ──
 function SignalCard({ handle, avatar, avatarColor, time, channel, symbol, direction, leverage, entry, sltp, reason, agrees, against, skips, compact, expired }: {
   handle: string; avatar: string; avatarColor?: string; time: string; channel: string;
@@ -399,7 +440,7 @@ function SignalCard({ handle, avatar, avatarColor, time, channel, symbol, direct
         <div className="signal-channel-badge">{channel}</div>
       </div>
       <div className="signal-grid">
-        <div className="sig-cell"><div className="sig-cell-label">{compact ? t("sig.symbol") : t("sig.symbol")}</div><div className="sig-cell-val">{symbol}</div></div>
+        <div className="sig-cell"><div className="sig-cell-label">{compact ? t("sig.symbol") : t("sig.symbol")}</div><div className="sig-cell-val sig-token">[{symbol}]</div></div>
         <div className="sig-cell"><div className="sig-cell-label">{compact ? t("sig.dir") : t("sig.direction")}</div><div className={`sig-cell-val ${direction}`}>{dirLabel}</div></div>
         <div className="sig-cell"><div className="sig-cell-label">{compact ? t("sig.lev") : t("sig.leverage")}</div><div className="sig-cell-val">{leverage}</div></div>
         <div className="sig-cell"><div className="sig-cell-label">{t("sig.entry")}</div><div className="sig-cell-val">{entry}</div></div>
@@ -438,6 +479,19 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
   const [showSkip, setShowSkip] = useState(false);
   const [skipped, setSkipped] = useState(false);
   const timerRef = useRef<number>(0);
+
+  // v4 Phase 7c — Connectivity test gate. Step 3 unlocks Enter Dashboard
+  // ONLY after: server pushes test signal → daemon LLM evaluates → daemon
+  // reacts +1 → web detects react in feed. If anything in this chain fails,
+  // user can't proceed.
+  type TestStage = "idle" | "pushing" | "waiting_react" | "success" | "fail";
+  const [testStage, setTestStage] = useState<TestStage>("idle");
+  const [testSignalId, setTestSignalId] = useState<string | null>(null);
+  const [testFailReason, setTestFailReason] = useState<string | null>(null);
+  const [testElapsedSec, setTestElapsedSec] = useState(0);
+  const testStartRef = useRef<number>(0);
+  const testPollRef = useRef<number>(0);
+  const testTickRef = useRef<number>(0);
 
 
   const goStep = (n: number) => {
@@ -527,23 +581,119 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
     }
   };
 
+  // Cleanup test poll timers when Onboarding unmounts.
+  useEffect(() => () => {
+    if (testPollRef.current) window.clearInterval(testPollRef.current);
+    if (testTickRef.current) window.clearInterval(testTickRef.current);
+  }, []);
+
+  const TEST_TIMEOUT_SEC = 90;
+  const triggerConnectivityTest = async () => {
+    if (!authToken) return;
+    setTestStage("pushing");
+    setTestFailReason(null);
+    setTestSignalId(null);
+    setTestElapsedSec(0);
+    testStartRef.current = Date.now();
+    fireOnboardingEvent("connectivity_test_click");
+
+    try {
+      const res = await fetch(`${API}/connectivity-test/trigger`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` },
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setTestStage("fail");
+        setTestFailReason(data?.message ?? data?.error ?? "trigger failed");
+        fireOnboardingEvent("connectivity_test_result", { result: "fail", context: { stage: "push", reason: data?.error } });
+        return;
+      }
+      setTestSignalId(data.signal_id);
+      setTestStage("waiting_react");
+
+      // Tick elapsed seconds every 1s for UI countdown
+      testTickRef.current = window.setInterval(() => {
+        const sec = Math.floor((Date.now() - testStartRef.current) / 1000);
+        setTestElapsedSec(sec);
+      }, 1000);
+
+      // Poll feed every 2s for daemon's reaction to the test signal
+      testPollRef.current = window.setInterval(async () => {
+        const elapsedSec = (Date.now() - testStartRef.current) / 1000;
+        if (elapsedSec > TEST_TIMEOUT_SEC) {
+          if (testPollRef.current) window.clearInterval(testPollRef.current);
+          if (testTickRef.current) window.clearInterval(testTickRef.current);
+          setTestStage("fail");
+          setTestFailReason(lang === "zh"
+            ? "等待 90 秒未收到 agent 反应。请确认 installer 跑完 + IDE 完全重启过 + LLM key 正常。"
+            : "No agent reaction after 90s. Check: installer ran clean, IDE fully restarted, LLM key valid.");
+          fireOnboardingEvent("connectivity_test_result", { result: "fail", context: { stage: "timeout", elapsed_sec: String(Math.floor(elapsedSec)) } });
+          return;
+        }
+        try {
+          const feedRes = await apiFetch<{ events: FeedItem[] }>("/signals/feed?limit=30");
+          const events = feedRes.events ?? [];
+          // Look for a +1 reaction by me to the test signal
+          const reacted = events.some((e) =>
+            e.kind === "reaction" &&
+            e.parent_signal_id === data.signal_id &&
+            e.payload?.value === "+1"
+          );
+          if (reacted) {
+            if (testPollRef.current) window.clearInterval(testPollRef.current);
+            if (testTickRef.current) window.clearInterval(testTickRef.current);
+            setTestStage("success");
+            fireOnboardingEvent("connectivity_test_result", { result: "success", context: { elapsed_sec: String(Math.floor(elapsedSec)) } });
+          }
+        } catch { /* swallow network blips; let timeout handle hard failures */ }
+      }, 2000);
+    } catch (e: any) {
+      setTestStage("fail");
+      setTestFailReason(e?.message ?? "network error");
+      fireOnboardingEvent("connectivity_test_result", { result: "fail", context: { stage: "network" } });
+    }
+  };
+
+  const fireOnboardingEvent = (action: string, extra: Record<string, unknown> = {}) => {
+    const tk = localStorage.getItem("susu_token");
+    fetch(`${API}/onboarding/event`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(tk ? { Authorization: `Bearer ${tk}` } : {}) },
+      body: JSON.stringify({ action, ...extra }),
+      keepalive: true,
+    }).catch(() => {});
+  };
+
   const testConnection = () => {
     setConnState("testing");
     setShowSkip(false);
     setSkipped(false);
+    fireOnboardingEvent("detect_click", { agent: selectedAgent });
     const tk = localStorage.getItem("susu_token");
-    if (!tk) { setConnState("fail"); setShowSkip(true); return; }
+    if (!tk) {
+      setConnState("fail"); setShowSkip(true);
+      fireOnboardingEvent("detect_result", { agent: selectedAgent, result: "fail", context: { reason: "no_token" } });
+      return;
+    }
     fetch(`${API}/identity/whoami`, { headers: { Authorization: `Bearer ${tk}` } })
       .then(r => { if (!r.ok) throw new Error(); return r.json(); })
       .then((me: any) => {
         if (me.last_mcp_ping_at) {
           const ago = Date.now() - new Date(me.last_mcp_ping_at).getTime();
-          if (ago < 5 * 60 * 1000) { setConnState("success"); return; }
+          if (ago < 5 * 60 * 1000) {
+            setConnState("success");
+            fireOnboardingEvent("detect_result", { agent: selectedAgent, result: "success" });
+            return;
+          }
         }
-        setConnState("fail");
-        setShowSkip(true);
+        setConnState("fail"); setShowSkip(true);
+        fireOnboardingEvent("detect_result", { agent: selectedAgent, result: "fail", context: { reason: "no_recent_ping" } });
       })
-      .catch(() => { setConnState("fail"); setShowSkip(true); });
+      .catch(() => {
+        setConnState("fail"); setShowSkip(true);
+        fireOnboardingEvent("detect_result", { agent: selectedAgent, result: "fail", context: { reason: "fetch_error" } });
+      });
   };
 
   const connHelpKeys = (agent: AgentId): string[] => {
@@ -609,115 +759,192 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
           </div>
         </div>
 
-        {/* Step 3: Connect Agent */}
+        {/* Step 3: One-click installer (v4) */}
         <div className={`onboard-step ${step === 3 ? "visible" : ""}`}>
           <div className="step-label">{t("ob.step3of3")}</div>
-          <div className="step-title">{t("ob.step3.title")}</div>
-          <div className="step-sub">{t("ob.step3.sub")}</div>
-          <div className="agent-question">{t("ob.step3.question")}</div>
-          <div className="ide-selector">
-            {AGENTS.map((a) => (
-              <button key={a.id} className={`ide-pill ${selectedAgent === a.id ? "active" : ""}`} onClick={() => setSelectedAgent(a.id)}>
-                {a.name}
-              </button>
-            ))}
+          <div className="step-title">{lang === "zh" ? "连接你的 AGENT" : "Connect your AGENT"}</div>
+          <div className="step-sub">{lang === "zh" ? "一行命令搞定 — installer 自动检测你所有装好的 AI IDE 并配置 Susurration。" : "One command. Installer auto-detects all your AI IDEs and wires up Susurration."}</div>
+
+          {/* Prerequisite checklist */}
+          <div className="prereq-list" style={{ background: "var(--surface-2, #1a1a1a)", border: "1px solid var(--border, #2a2a2a)", borderRadius: 6, padding: "12px 14px", marginTop: 16, marginBottom: 16 }}>
+            <div style={{ fontSize: 11, color: "var(--ink-soft)", textTransform: "uppercase", letterSpacing: "0.6px", marginBottom: 8 }}>
+              {lang === "zh" ? "开始前请确认" : "Before you run"}
+            </div>
+            <ul style={{ listStyle: "none", padding: 0, margin: 0, fontSize: 12, lineHeight: 1.8 }}>
+              <li>✓ {lang === "zh" ? "钱包已签名" : "Wallet signed"} <span style={{ color: "var(--green)" }}>✓</span></li>
+              <li>
+                {lang === "zh" ? "已装 AI IDE：" : "An AI IDE installed: "}
+                Claude Code · Cursor · Windsurf · Cline · Codex
+                <span style={{ color: "var(--ink-faint)", fontSize: 11 }}> ({lang === "zh" ? "任一" : "any one"})</span>
+              </li>
+              <li>
+                {lang === "zh" ? "已有 LLM API key：" : "An LLM API key: "}
+                <a href="https://console.anthropic.com" target="_blank" rel="noopener noreferrer" style={{ color: "var(--blue, #3b82f6)" }}>Anthropic</a>
+                <span style={{ color: "var(--ink-faint)" }}> {lang === "zh" ? "或" : "or"} </span>
+                <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" style={{ color: "var(--blue, #3b82f6)" }}>OpenAI</a>
+                <div style={{ fontSize: 10, color: "var(--ink-faint)", marginTop: 2 }}>
+                  {lang === "zh" ? "Installer 会自动读 ANTHROPIC_API_KEY / OPENAI_API_KEY 环境变量" : "Installer auto-reads ANTHROPIC_API_KEY / OPENAI_API_KEY env vars"}
+                </div>
+              </li>
+            </ul>
           </div>
 
-          {/* MCP-based agents */}
-          {(["claude", "cursor", "copilot", "windsurf", "codex", "cline"] as AgentId[]).map((aid) => {
-            const promptText = `Add the Susurration MCP server to your config, then run susu_join to complete setup.\n\nMCP config JSON:\n${mcpJson(authToken || "sk_live_YOUR_TOKEN")}\n\n⚠️ IMPORTANT: After adding the config, you MUST fully restart your agent (quit and reopen the app — e.g. close the Claude Code terminal and start a new session). The MCP server only loads on startup. Without a restart, connection test will fail.\n\nAfter restart, run:\n  susu_join @${handleVal || "your_handle"} --llm-key YOUR_LLM_API_KEY\n\nTo verify: run susu_whoami — you should see your @handle.`;
-            return (
-            <div key={aid} className={`agent-setup ${selectedAgent === aid ? "visible" : ""}`}>
-              <div className="d-code-block">
-                <div className="d-code-block-label">
-                  <span>{lang === "zh" ? "完整提示词（复制给你的 Agent）" : "Prompt (copy to your Agent)"}</span>
-                  <CopyBtn text={promptText} />
-                </div>
-                <pre style={{ whiteSpace: "pre-wrap", fontSize: 11, lineHeight: 1.6, color: "var(--ink-soft)" }}>{promptText}</pre>
-              </div>
-              <div className="agent-tip">{t(`agent.${aid}.tip`)}</div>
+          {/* The one command — prefixed with a single space so zsh/bash with
+              HIST_IGNORE_SPACE / HISTCONTROL=ignorespace won't record the
+              token to ~/.zsh_history / ~/.bash_history. Both shells default
+              to this behavior on modern macOS/Linux. */}
+          <div className="d-code-block" style={{ marginBottom: 8 }}>
+            <div className="d-code-block-label">
+              <span>{lang === "zh" ? "在你的终端跑这一行" : "Run this in your terminal"}</span>
+              <CopyBtn
+                text={` npx -y @susurration/installer install --token ${authToken || "sk_live_YOUR_TOKEN"}`}
+                className="copy-prominent"
+              />
             </div>
-            );
-          })}
-
-          {/* Other */}
-          <div className={`agent-setup ${selectedAgent === "other" ? "visible" : ""}`}>
-            <div className="agent-question" style={{ marginBottom: 14 }}>{t("agent.other.intro")}</div>
-            <div style={{ marginBottom: 18 }}>
-              <div style={{ fontSize: 11, color: "var(--ink)", letterSpacing: "0.5px", marginBottom: 8 }}>{t("agent.other.webhookTitle")}</div>
-              <div className="agent-tip" style={{ marginBottom: 8 }}>{t("agent.other.webhookDesc")}</div>
-              <div className="d-code-block">
-                <div className="d-code-block-label">
-                  <span>{t("agent.other.webhookLabel")}</span>
-                  <CopyBtn text={`POST https://api.susurration.xyz/api/identity/webhook\nAuthorization: Bearer ${authToken || "sk_live_YOUR_TOKEN"}\nContent-Type: application/json\n\n{\n  "url": "https://your-agent.example.com/susu"\n}`} />
-                </div>
-                <pre>
-                  <span className="tok-key">POST</span>{" "}<span className="tok-str">https://api.susurration.xyz/api/identity/webhook</span>{"\n"}
-                  <span className="tok-key">Authorization:</span>{" "}<span className="tok-str">Bearer {maskToken(authToken || "sk_live_YOUR_TOKEN")}</span>{"\n"}
-                  <span className="tok-key">Content-Type:</span>{" "}<span className="tok-str">application/json</span>{"\n\n"}
-                  <span className="tok-punct">{"{"}</span>{"\n  "}
-                  <span className="tok-key">"url"</span><span className="tok-punct">:</span>{" "}<span className="tok-str">"https://your-agent.example.com/susu"</span>{"\n"}
-                  <span className="tok-punct">{"}"}</span>
-                </pre>
-              </div>
-            </div>
-            <div>
-              <div style={{ fontSize: 11, color: "var(--ink)", letterSpacing: "0.5px", marginBottom: 8 }}>{t("agent.other.sseTitle")}</div>
-              <div className="agent-tip" style={{ marginBottom: 8 }}>{t("agent.other.sseDesc")}</div>
-              <div className="d-code-block">
-                <div className="d-code-block-label">
-                  <span>{t("agent.other.sseLabel")}</span>
-                  <CopyBtn text={`GET https://api.susurration.xyz/api/signals/feed/stream\nAuthorization: Bearer ${authToken || "sk_live_YOUR_TOKEN"}\nAccept: text/event-stream`} />
-                </div>
-                <pre>
-                  <span className="tok-key">GET</span>{" "}<span className="tok-str">https://api.susurration.xyz/api/signals/feed/stream</span>{"\n"}
-                  <span className="tok-key">Authorization:</span>{" "}<span className="tok-str">Bearer {maskToken(authToken || "sk_live_YOUR_TOKEN")}</span>{"\n"}
-                  <span className="tok-key">Accept:</span>{" "}<span className="tok-str">text/event-stream</span>
-                </pre>
-              </div>
-            </div>
-            <div className="agent-tip" style={{ marginTop: 12 }}>
-              {t("agent.other.docsDesc")}
-            </div>
+            <pre style={{ whiteSpace: "pre-wrap", fontSize: 12, lineHeight: 1.7 }}>
+              <span className="tok-key">{" "}npx</span>
+              {" "}
+              <span className="tok-str">-y @susurration/installer install --token </span>
+              <span className="tok-num">{maskToken(authToken || "sk_live_YOUR_TOKEN")}</span>
+            </pre>
+          </div>
+          <div style={{ fontSize: 10, color: "var(--ink-faint)", marginBottom: 16, lineHeight: 1.6 }}>
+            {lang === "zh"
+              ? <>命令前有一个空格 — 现代 zsh / bash 在 <code>HIST_IGNORE_SPACE</code> / <code>HISTCONTROL=ignorespace</code> 默认开启时不会把这行记入 history（保护 token）。若你自定义过这个行为，跑完后可手动 <code>history -d -1</code> 清掉。</>
+              : <>The command is prefixed with a space — modern zsh / bash with default <code>HIST_IGNORE_SPACE</code> / <code>HISTCONTROL=ignorespace</code> won't log this line to shell history (protects your token). If you've customized that setting, run <code>history -d -1</code> after to clear it.</>
+            }
           </div>
 
-          {/* Connection test */}
-          <div className="conn-test">
-            <div className="conn-test-label">{t("ob.conn.label")}</div>
-            <button
-              className={`conn-test-btn ${connState}`}
-              disabled={connState === "testing" || connState === "success"}
-              onClick={testConnection}
-            >
-              {connState === "testing" ? t("ob.conn.checking") + "…" :
-               connState === "success" ? t("ob.conn.success") :
-               connState === "fail" ? t("ob.conn.fail") :
-               t("ob.conn.test")}
-            </button>
-            <div className="conn-test-status">
-              {connState === "testing" && <span>{t("ob.conn.checking")}...</span>}
-              {connState === "success" && <span style={{ color: "var(--green)" }}>{t("ob.conn.successDetail")}</span>}
-              {connState === "fail" && (
-                <ul className="conn-fail-help">
-                  {connHelpKeys(selectedAgent).map((k) => <li key={k}>{t(k)}</li>)}
-                </ul>
-              )}
-              {skipped && <span style={{ color: "var(--ink-faint)" }}>{t("ob.conn.skipped")}</span>}
+          <div className="agent-tip" style={{ marginBottom: 16, lineHeight: 1.7 }}>
+            {lang === "zh"
+              ? <>
+                  Installer 会做这 4 件事：<br/>
+                  1. 检测你装好的所有 AI IDE<br/>
+                  2. 装 daemon (<code style={{ background: "var(--surface-2, #1a1a1a)", padding: "1px 4px", borderRadius: 3, fontSize: 11 }}>npm install -g susurration-agent-daemon</code>)<br/>
+                  3. 写 MCP 配置到每个 IDE + 写 <code style={{ background: "var(--surface-2, #1a1a1a)", padding: "1px 4px", borderRadius: 3, fontSize: 11 }}>~/.susu/agent-config.json</code><br/>
+                  4. 启动 daemon
+                  <div style={{ marginTop: 10, color: "var(--yellow, #f59e0b)" }}>
+                    ⚠ 完成后必须<strong>完全退出 IDE（Cmd+Q）再重开</strong>，MCP 只在启动时加载。<code>/clear</code> 或新 tab 不行。
+                  </div>
+                </>
+              : <>
+                  Installer does these 4 things:<br/>
+                  1. Detects all your installed AI IDEs<br/>
+                  2. Installs the daemon (<code style={{ background: "var(--surface-2, #1a1a1a)", padding: "1px 4px", borderRadius: 3, fontSize: 11 }}>npm install -g susurration-agent-daemon</code>)<br/>
+                  3. Writes MCP config to each IDE + writes <code style={{ background: "var(--surface-2, #1a1a1a)", padding: "1px 4px", borderRadius: 3, fontSize: 11 }}>~/.susu/agent-config.json</code><br/>
+                  4. Spawns the daemon
+                  <div style={{ marginTop: 10, color: "var(--yellow, #f59e0b)" }}>
+                    ⚠ When done you must <strong>completely quit your IDE (Cmd+Q) and reopen</strong>. MCP loads on startup only. <code>/clear</code> or a new tab will NOT work.
+                  </div>
+                </>
+            }
+          </div>
+
+          {/* v4 Phase 7c — Connectivity test gate. Enter Dashboard is locked
+              until a real signal → daemon eval → daemon react round-trip
+              completes. This guarantees every user who lands on Dashboard
+              has a working agent connection. */}
+          <div style={{ marginTop: 20, padding: 14, background: "var(--surface-2, #141414)", border: "1px solid var(--border, #2a2a2a)", borderRadius: 6 }}>
+            <div style={{ fontSize: 12, color: "var(--ink)", fontWeight: 500, marginBottom: 6 }}>
+              {lang === "zh" ? "连通测试（必经一步）" : "Connectivity test (required)"}
             </div>
-            {showSkip && !skipped && (
-              <button className="conn-test-skip" onClick={() => { setSkipped(true); setShowSkip(false); }}>
-                {t("ob.conn.skip")}
+            <div style={{ fontSize: 11, color: "var(--ink-faint)", lineHeight: 1.7, marginBottom: 12 }}>
+              {lang === "zh"
+                ? "点击下方按钮，我们会推一条真实的测试信号给你的 agent。只有你的 agent 收到、评估、并 react +1（自动开仓），下方「进入 Dashboard」按钮才会解锁。"
+                : "Click below to push a real test signal to your agent. Enter Dashboard unlocks only after your agent receives → evaluates → reacts +1 (auto-opens a paper position)."
+              }
+            </div>
+
+            {testStage === "idle" && (
+              <button
+                className="ob-btn-next"
+                onClick={triggerConnectivityTest}
+                style={{ width: "100%" }}
+              >
+                {lang === "zh" ? "开始连通测试" : "Start connectivity test"}
               </button>
+            )}
+
+            {testStage === "pushing" && (
+              <div style={{ fontSize: 11, color: "var(--ink-soft)" }}>
+                {lang === "zh" ? "正在推送测试信号…" : "Pushing test signal…"}
+              </div>
+            )}
+
+            {testStage === "waiting_react" && (
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                  <span style={{
+                    display: "inline-block", width: 8, height: 8, borderRadius: "50%",
+                    background: "var(--green, #10b981)",
+                    animation: "daemon-pulse 1.2s ease-in-out infinite",
+                  }} />
+                  <span style={{ fontSize: 11, color: "var(--ink-soft)" }}>
+                    {lang === "zh"
+                      ? `信号已推送，等待 agent 反应… (${testElapsedSec}s / ${TEST_TIMEOUT_SEC}s)`
+                      : `Signal pushed, waiting for agent to react… (${testElapsedSec}s / ${TEST_TIMEOUT_SEC}s)`
+                    }
+                  </span>
+                </div>
+                <div style={{ fontSize: 10, color: "var(--ink-faint)", lineHeight: 1.6 }}>
+                  {lang === "zh"
+                    ? "如果迟迟没反应，最常见原因：① IDE 没完全重启 ② LLM key 没在 env 里（installer 会读 ANTHROPIC_API_KEY / OPENAI_API_KEY）③ daemon 进程 crash（看 ~/.susu/agent-decisions.jsonl）"
+                    : "Common stalls: ① IDE not fully restarted ② LLM key not in env (installer reads ANTHROPIC_API_KEY / OPENAI_API_KEY) ③ daemon crashed (check ~/.susu/agent-decisions.jsonl)"
+                  }
+                </div>
+              </div>
+            )}
+
+            {testStage === "success" && (
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                  <span style={{ color: "var(--green, #10b981)", fontSize: 14, fontWeight: 600 }}>✓</span>
+                  <span style={{ fontSize: 12, color: "var(--green, #10b981)" }}>
+                    {lang === "zh" ? "连通正常！Agent 已开仓。" : "Connected! Agent opened a position."}
+                  </span>
+                </div>
+                <div style={{ fontSize: 10, color: "var(--ink-faint)" }}>
+                  {lang === "zh" ? "进入 Dashboard 后可在 Feed 流看到这条信号 + Positions 看到这笔仓位。" : "After entering Dashboard you'll see this signal in Feed + the position in Positions."}
+                </div>
+              </div>
+            )}
+
+            {testStage === "fail" && (
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                  <span style={{ color: "var(--red, #ef4444)", fontSize: 14, fontWeight: 600 }}>✗</span>
+                  <span style={{ fontSize: 12, color: "var(--red, #ef4444)" }}>
+                    {lang === "zh" ? "测试失败" : "Test failed"}
+                  </span>
+                </div>
+                {testFailReason && (
+                  <div style={{ fontSize: 11, color: "var(--ink-faint)", lineHeight: 1.6, marginBottom: 10 }}>
+                    {testFailReason}
+                  </div>
+                )}
+                <button
+                  className="ob-btn-back"
+                  onClick={triggerConnectivityTest}
+                  style={{ fontSize: 11, padding: "6px 14px" }}
+                >
+                  {lang === "zh" ? "重试" : "Retry"}
+                </button>
+              </div>
             )}
           </div>
 
           <div className="onboard-nav">
             <button className="ob-btn-back" onClick={() => goStep(2)}>{t("ob.back")}</button>
-            <button className="ob-btn-next" disabled={connState !== "success" && !skipped} onClick={() => {
-              localStorage.setItem("susu_agent", selectedAgent);
-              apiFetch("/friends/add", { method: "POST", body: JSON.stringify({ username: "demo" }) }).catch(() => {});
-              onComplete();
-            }}>{t("ob.enter")}</button>
+            <button
+              className="ob-btn-next"
+              disabled={testStage !== "success"}
+              title={testStage !== "success" ? (lang === "zh" ? "请先完成连通测试" : "Complete connectivity test first") : undefined}
+              onClick={() => {
+                fireOnboardingEvent("enter_dashboard", { agent: "installer", result: "detected", context: { test_passed: "true" } });
+                localStorage.setItem("susu_agent", "installer");
+                onComplete();
+              }}
+            >{lang === "zh" ? "进入 Dashboard" : "Enter Dashboard"}</button>
           </div>
         </div>
       </div>
@@ -728,10 +955,141 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
 // ════════════════════════════════════════════════════════
 //   SIDEBAR
 // ════════════════════════════════════════════════════════
-function Sidebar({ page, setPage }: { page: Page; setPage: (p: Page) => void }) {
+// v4 — Daemon alive indicator (5 states based on last_daemon_ping_at + last_mcp_ping_at)
+type DaemonAliveState = "never" | "down" | "lagging" | "alive" | "connecting";
+function DaemonAliveIndicator() {
+  const { lang } = useLang();
+  const [state, setState] = useState<DaemonAliveState>("connecting");
+  const [lastPingSec, setLastPingSec] = useState<number | null>(null);
+  const auth = useAuth();
+  useEffect(() => {
+    if (!auth.token) return;
+    let cancelled = false;
+    const poll = () => {
+      apiFetch<{ last_daemon_ping_at: string | null; last_mcp_ping_at: string | null; created_at: string | null }>("/identity/whoami").then(me => {
+        if (cancelled) return;
+        // Daemon ping wins over MCP ping (daemon is what evaluates signals)
+        const pingIso = me.last_daemon_ping_at ?? me.last_mcp_ping_at ?? null;
+        if (!pingIso) {
+          // NEVER vs CONNECTING: if account < 90s old, still in CONNECTING (give installer time)
+          const accountAgeSec = me.created_at ? (Date.now() - new Date(me.created_at).getTime()) / 1000 : Infinity;
+          setState(accountAgeSec < 90 ? "connecting" : "never");
+          setLastPingSec(null);
+          return;
+        }
+        const agoSec = Math.floor((Date.now() - new Date(pingIso).getTime()) / 1000);
+        setLastPingSec(agoSec);
+        // Backend SSE heartbeat updates last_daemon_ping_at every 3 min
+        // (signals.ts:883 DAEMON_PING_INTERVAL). Thresholds tuned to match:
+        //   alive:    < 4 min (one ping cycle + 1 min jitter for fly proxy)
+        //   lagging:  4-10 min (missed 1-3 cycles)
+        //   down:     > 10 min (sustained disconnect)
+        if (agoSec < 4 * 60) setState("alive");
+        else if (agoSec < 10 * 60) setState("lagging");
+        else setState("down");
+      }).catch(() => { /* don't flip state on network blip */ });
+    };
+    poll();
+    const id = setInterval(poll, 10_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [auth.token]);
+
+  const cfg: Record<DaemonAliveState, { color: string; label: { en: string; zh: string }; tooltip: { en: string; zh: string } }> = {
+    alive: { color: "#10B981", label: { en: "Agent online", zh: "Agent 在线" }, tooltip: { en: "Last ping under 30s ago", zh: "最近心跳 < 30 秒" } },
+    lagging: { color: "#A1A1AA", label: { en: "Agent lagging", zh: "Agent 延迟" }, tooltip: { en: "Last ping 30s-5min ago", zh: "心跳 30 秒至 5 分钟" } },
+    down: { color: "#EF4444", label: { en: "Agent offline", zh: "Agent 离线" }, tooltip: { en: "No ping in >5min", zh: "5 分钟无心跳" } },
+    never: { color: "#3F3F46", label: { en: "No agent yet", zh: "未连接 agent" }, tooltip: { en: "Run installer in your terminal", zh: "去终端跑 installer" } },
+    connecting: { color: "#10B981", label: { en: "Connecting…", zh: "连接中…" }, tooltip: { en: "Waiting for first daemon ping", zh: "等待 daemon 首次心跳" } },
+  };
+  const c = cfg[state];
+  const label = lang === "zh" ? c.label.zh : c.label.en;
+  const tooltip = lang === "zh" ? c.tooltip.zh : c.tooltip.en;
+  const fireEvent = useCallback((action: "view" | "click") => {
+    const tk = localStorage.getItem("susu_token");
+    if (!tk) return;
+    const eventType = action === "view" ? "dashboard_indicator_view" : "dashboard_indicator_click";
+    fetch(`${API}/onboarding/event`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${tk}` },
+      body: JSON.stringify({ action: eventType, context: { state, last_ping_sec: lastPingSec ?? -1 } }),
+      keepalive: true,
+    }).catch(() => {});
+  }, [state, lastPingSec]);
+  // Fire view event ONCE on mount only — state oscillation (alive↔lagging) would
+  // otherwise generate N events per session, polluting analytics.
+  const viewFiredRef = useRef(false);
+  useEffect(() => {
+    if (viewFiredRef.current) return;
+    viewFiredRef.current = true;
+    fireEvent("view");
+  }, [fireEvent]);
+  // 放在 page-header 右上角（pill 风格）。alive 绿点呼吸 + 文字"连接正常"。
+  // 其他状态相应。Sidebar bottom 不再显示（避免冗余）。
+  const pingSuffix = lastPingSec !== null && state !== "connecting" ? ` · ${lastPingSec}s` : "";
+  // alive 也呼吸，让"agent 在工作"有视觉反馈（Haze 要求）
+  const shouldPulse = state === "alive" || state === "connecting";
+  const friendlyLabel: Record<DaemonAliveState, { en: string; zh: string }> = {
+    alive: { en: "Connected", zh: "连接正常" },
+    lagging: { en: "Lagging", zh: "代理延迟" },
+    down: { en: "Offline", zh: "代理离线" },
+    never: { en: "Not connected", zh: "未连接" },
+    connecting: { en: "Connecting…", zh: "连接中…" },
+  };
+  const labelTxt = lang === "zh" ? friendlyLabel[state].zh : friendlyLabel[state].en;
+  return (
+    <div
+      className={`daemon-alive-indicator daemon-alive-${state}`}
+      title={`${labelTxt}${pingSuffix}\n${tooltip}`}
+      aria-label={`${labelTxt}${pingSuffix}`}
+      onClick={() => fireEvent("click")}
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 8,
+        padding: "5px 12px", borderRadius: 999,
+        cursor: "pointer", transition: "background 0.15s",
+        background: "var(--surface2, rgba(255,255,255,0.04))",
+        border: "0.5px solid var(--border2, rgba(255,255,255,0.08))",
+        fontSize: 11, color: "var(--ink-soft)",
+        userSelect: "none",
+      }}
+    >
+      <span
+        className="daemon-dot"
+        style={{
+          display: "inline-block", width: 8, height: 8, borderRadius: "50%",
+          background: c.color, flexShrink: 0,
+          animation: shouldPulse ? "daemon-pulse 1.6s ease-in-out infinite" : undefined,
+        }}
+      />
+      <span style={{ whiteSpace: "nowrap" }}>{labelTxt}</span>
+    </div>
+  );
+}
+
+// ── Bottom status bar — daemon ● + wallet + peer-id (trade.xyz-style) ──
+function StatusBar() {
+  const auth = useAuth();
+  if (!auth.token) return null;
+  const handle = auth.username;
+  const addr = auth.address;
+  const walletShort = addr ? `${addr.slice(0, 4)}…${addr.slice(-4)}` : null;
+  const peerId = handle ?? (addr ? addr.slice(0, 8) : null);
+  return (
+    <div className="status-bar">
+      <div className="status-bar-left">
+        <DaemonAliveIndicator />
+      </div>
+      <div className="status-bar-right">
+        {walletShort && <span className="status-item">wallet:<span className="status-mono">{walletShort}</span></span>}
+        {peerId && <span className="status-item">⊶ <span className="status-mono">{peerId}</span></span>}
+      </div>
+    </div>
+  );
+}
+
+function Sidebar({ page, setPage, hasNewActivity }: { page: Page; setPage: (p: Page) => void; hasNewActivity: boolean }) {
   const { t } = useLang();
-  const items: { id: Page; tip: string; icon: React.ReactNode; badge?: boolean }[] = [
-    { id: "dashboard", tip: t("tip.dashboard"), icon: (
+  const items: { id: Page; tip: string; label: string; icon: React.ReactNode; badge?: boolean }[] = [
+    { id: "dashboard", tip: t("tip.dashboard"), label: t("tip.dashboard"), icon: (
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
         <rect x="1.5" y="1.5" width="5.5" height="5.5" stroke="currentColor" strokeWidth="1.2"/>
         <rect x="9" y="1.5" width="5.5" height="5.5" stroke="currentColor" strokeWidth="1.2"/>
@@ -739,12 +1097,12 @@ function Sidebar({ page, setPage }: { page: Page; setPage: (p: Page) => void }) 
         <rect x="9" y="9" width="5.5" height="5.5" stroke="currentColor" strokeWidth="1.2"/>
       </svg>
     )},
-    { id: "feed", tip: t("tip.activity"), badge: true, icon: (
+    { id: "feed", tip: t("tip.activity"), label: t("tip.activity"), badge: hasNewActivity, icon: (
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
         <path d="M2 4h12M2 8h8M2 12h10" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
       </svg>
     )},
-    { id: "friends", tip: t("tip.friends"), icon: (
+    { id: "friends", tip: t("tip.friends"), label: t("tip.friends"), icon: (
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
         <circle cx="6" cy="5.5" r="2.5" stroke="currentColor" strokeWidth="1.2"/>
         <path d="M1 13c0-2.76 2.24-5 5-5h0c2.76 0 5 2.24 5 5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
@@ -752,14 +1110,14 @@ function Sidebar({ page, setPage }: { page: Page; setPage: (p: Page) => void }) 
         <path d="M12 10.5c1.66 0 3 1.34 3 3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
       </svg>
     )},
-    { id: "mode", tip: t("tip.mode"), icon: (
+    { id: "mode", tip: t("tip.mode"), label: t("tip.mode"), icon: (
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
         <path d="M4 13V8l4-5 4 5v5" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
         <path d="M4 13h8" stroke="currentColor" strokeWidth="1.2"/>
         <circle cx="8" cy="9" r="1.5" stroke="currentColor" strokeWidth="1.2"/>
       </svg>
     )},
-    { id: "settings", tip: t("tip.settings"), icon: (
+    { id: "settings", tip: t("tip.settings"), label: t("tip.settings"), icon: (
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
         <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.8"/>
         <path d="M10.3 2.3l-.4 1.9c-.6.2-1.1.5-1.6.9L6.5 4.5l-1.7 3 1.4 1.4c-.1.4-.1.7-.1 1.1s0 .7.1 1.1l-1.4 1.4 1.7 3 1.8-.6c.5.4 1 .7 1.6.9l.4 1.9h3.4l.4-1.9c.6-.2 1.1-.5 1.6-.9l1.8.6 1.7-3-1.4-1.4c.1-.4.1-.7.1-1.1s0-.7-.1-1.1l1.4-1.4-1.7-3-1.8.6c-.5-.4-1-.7-1.6-.9l-.4-1.9h-3.4z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" fill="none"/>
@@ -779,6 +1137,7 @@ function Sidebar({ page, setPage }: { page: Page; setPage: (p: Page) => void }) 
           <button key={item.id} className={`d-nav-item ${page === item.id ? "active" : ""}`} data-tip={item.tip} data-page={item.id} onClick={() => setPage(item.id)}>
             {item.badge && <div className="dot-badge" />}
             {item.icon}
+            <span className="nav-label">{item.label}</span>
           </button>
         ))}
       </div>
@@ -794,53 +1153,112 @@ function Sidebar({ page, setPage }: { page: Page; setPage: (p: Page) => void }) 
 //   DASHBOARD HOME
 // ════════════════════════════════════════════════════════
 function DashHome() {
-  const { t } = useLang();
+  const { t, lang } = useLang();
   const auth = useAuth();
   const navigate = useNav();
   const [friends, setFriends] = useState<Friend[]>([]);
+  const [friendsReady, setFriendsReady] = useState(false);
   const [feed, setFeed] = useState<FeedItem[]>([]);
   const [positions, setPositions] = useState<Position[]>([]);
   const [pricesLoaded, setPricesLoaded] = useState(false);
+  const [persistedCloses, setPersistedCloses] = useState<Map<string, CloseRecord>>(new Map());
 
+  const { setHasNew } = useContext(ActivityBadgeContext);
+
+  // v4 self-heal: if register-time ensureDemoFriend hit a transient DB error
+  // and never retried, the user lands on an empty dashboard with no signal source.
+  // After first /friends fetch returns 0-demo, try to add @demo once. Idempotent
+  // server-side: if already friends, /friends/add returns "already_friends" 200,
+  // no-op. Guarded by localStorage so we only attempt once per browser.
+  const selfHealedRef = useRef(false);
   useEffect(() => {
-    apiFetch<{ friends: Friend[] }>("/friends").then(r => setFriends(r.friends)).catch(() => {});
-    apiFetch<{ events: FeedItem[] }>("/signals/feed?limit=200").then(r => setFeed(r.events ?? [])).catch(() => {});
+    if (selfHealedRef.current) return;
+    if (!friendsReady) return;
+    if (localStorage.getItem("susu_demo_selfheal_done") === "1") return;
+    const hasDemo = friends.some((f) => f.friend_username === "demo");
+    if (hasDemo) {
+      localStorage.setItem("susu_demo_selfheal_done", "1");
+      return;
+    }
+    selfHealedRef.current = true;
+    apiFetch("/friends/add", { method: "POST", body: JSON.stringify({ username: "demo" }) })
+      .then(() => {
+        localStorage.setItem("susu_demo_selfheal_done", "1");
+        // Re-fetch friends so the UI updates without page reload
+        apiFetch<{ friends: Friend[] }>("/friends").then((r) => setFriends(r.friends)).catch(() => {});
+      })
+      .catch((err) => {
+        // Don't poison the flag — let next dashboard load retry. But cap a
+        // soft attempt window so we don't pound the endpoint every page view.
+        console.warn("[demo-selfheal] add @demo failed:", err?.message);
+      });
+  }, [friendsReady, friends]);
+
+  const fetchData = useCallback(() => {
+    apiFetch<{ friends: Friend[] }>("/friends").then(r => { setFriends(r.friends); setFriendsReady(true); }).catch(() => { setFriendsReady(true); });
+    apiFetch<{ events: FeedItem[] }>("/signals/feed?limit=200").then(r => {
+      const events = r.events ?? [];
+      setFeed(events);
+      if (events.length > 0) {
+        const lastSeen = parseInt(localStorage.getItem("susu_feed_seen_at") || "0");
+        if (new Date(events[0]!.created_at).getTime() > lastSeen) setHasNew(true);
+      }
+    }).catch(() => {});
+    apiFetch<{ closes: { signal_id: string; exit_reason: string; exit_price: number; exit_pnl_pct: number }[] }>("/positions/closed")
+      .then(r => {
+        const m = new Map<string, CloseRecord>();
+        for (const c of r.closes) m.set(c.signal_id, { exit_reason: c.exit_reason, exit_price: c.exit_price, exit_pnl_pct: c.exit_pnl_pct });
+        setPersistedCloses(m);
+      }).catch(e => console.warn("[positions/closed] fetch failed:", e.message));
   }, []);
 
   useEffect(() => {
+    fetchData();
+    const poll = setInterval(fetchData, 30_000);
+    return () => clearInterval(poll);
+  }, [fetchData]);
+
+  const refreshPositions = useCallback(() => {
     if (!auth.address || feed.length === 0) return;
     const raw = buildPositions(feed, auth.address);
     if (raw.length === 0) { setPositions([]); setPricesLoaded(true); return; }
     const symbols = [...new Set(raw.map(p => p.token))].join(",");
     apiFetch<{ prices: Record<string, number> }>(`/prices?symbols=${symbols}`)
-      .then(r => { setPositions(applyPrices(raw, r.prices)); setPricesLoaded(true); })
+      .then(r => {
+        const { positions: updated } = applyPrices(raw, r.prices, persistedCloses);
+        setPositions(updated);
+        setPricesLoaded(true);
+      })
       .catch(() => { setPositions(raw); setPricesLoaded(true); });
-  }, [feed, auth.address]);
+  }, [feed, auth.address, persistedCloses]);
+
+  useEffect(() => {
+    refreshPositions();
+    const poll = setInterval(refreshPositions, 5_000);
+    return () => clearInterval(poll);
+  }, [refreshPositions]);
 
   const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
   const todaySignals = feed.filter(f => f.kind === "signal" && new Date(f.created_at) >= todayStart).length;
 
-  const totalPnl = positions.reduce((s, p) => s + (p.pnlUsd ?? 0), 0);
-  const openPositions = positions.filter(p => p.status === "open").sort((a, b) => Math.abs(b.pnlPct ?? 0) - Math.abs(a.pnlPct ?? 0));
-  const closedPositions = positions.filter(p => p.status === "closed").sort((a, b) => Math.abs(b.pnlPct ?? 0) - Math.abs(a.pnlPct ?? 0));
-  const hasPositions = positions.length > 0;
+  // v4: replay positions are dry-run demos — excluded from PnL aggregates
+  // so users don't accidentally treat demo PnL as real performance.
+  const realPositions = positions.filter(p => !p.isReplay);
+  const totalPnl = realPositions.reduce((s, p) => s + (p.pnlUsd ?? 0), 0);
+  const totalCapital = realPositions.reduce((s, p) => s + p.positionUsd, 0);
+  const totalPnlPct = totalCapital > 0 ? (totalPnl / totalCapital) * 100 : 0;
+  const openPositions = realPositions.filter(p => p.status === "open").sort((a, b) => Math.abs(b.pnlPct ?? 0) - Math.abs(a.pnlPct ?? 0));
+  const closedPositions = realPositions.filter(p => p.status === "closed").sort((a, b) => Math.abs(b.pnlPct ?? 0) - Math.abs(a.pnlPct ?? 0));
+  const demoPositions = positions.filter(p => p.isReplay).sort((a, b) => Math.abs(b.pnlPct ?? 0) - Math.abs(a.pnlPct ?? 0));
+  const hasPositions = realPositions.length > 0;
 
-  const agentId = localStorage.getItem("susu_agent") as AgentId | null;
-  const agentName = agentId ? AGENTS.find(a => a.id === agentId)?.name ?? agentId : null;
-
-  const pnlColor = totalPnl > 0 ? "#4caf50" : totalPnl < 0 ? "#ef5350" : "var(--ink-faint)";
-  const pnlSign = totalPnl > 0 ? "+" : "";
+  const pnlColor = totalPnl > 0 ? "var(--green)" : totalPnl < 0 ? "var(--red)" : "var(--ink-faint)";
+  const pnlSign = totalPnl > 0 ? "+" : totalPnl < 0 ? "-" : "";
 
   return (
     <div className="d-page active" style={{ display: "flex" }}>
       <div className="d-page-header">
         <div className="d-page-title">susurration / <strong>{t("dash.title")}</strong></div>
-        {agentName && (
-          <div className="agent-status-pill" title={`Connected via ${agentName}`}>
-            <span className="agent-status-dot" />
-            <span className="agent-status-label">{agentName}</span>
-          </div>
-        )}
       </div>
       <div className="dash-body">
         <div className="stat-row">
@@ -856,7 +1274,7 @@ function DashHome() {
             <div className="stat-label">{t("dash.pnl")} <span style={{ textTransform: "none", letterSpacing: 0, opacity: 0.7 }}>· {t("dash.fromSignals")}</span></div>
             {hasPositions && pricesLoaded ? (
               <>
-                <div className="stat-value" style={{ color: pnlColor }}>{pnlSign}${Math.abs(totalPnl).toFixed(2)}</div>
+                <div className="stat-value" style={{ color: pnlColor }}>{pnlSign}${Math.abs(totalPnl).toFixed(2)} <span style={{ fontSize: 14, color: pnlColor }}>({pnlSign}{Math.abs(totalPnlPct).toFixed(1)}%)</span></div>
                 <div className="stat-sub" style={{ fontSize: 10, color: "var(--ink-faint)" }}>
                   {openPositions.length} {t("dash.posOpen")} · {closedPositions.length} {t("dash.posClosed")}
                 </div>
@@ -867,11 +1285,15 @@ function DashHome() {
           </div>
         </div>
 
-        {todaySignals === 0 && friends.length === 0 && (
+        {friendsReady && todaySignals === 0 && friends.length === 0 && (
           <div className="positions-card" style={{ textAlign: "center", padding: "32px 16px" }}>
             <div style={{ fontSize: 13, color: "var(--ink-faint)", marginBottom: 12 }}>{t("dash.noSignalsSub")}</div>
             <button className="btn-primary" style={{ fontSize: 12, padding: "8px 20px" }} onClick={() => navigate("friends")}>{t("dash.addFirstFriend")}</button>
           </div>
+        )}
+
+        {friendsReady && friends.length > 0 && todaySignals === 0 && (
+          <AwaitingSignalCard />
         )}
 
         <div className="positions-card">
@@ -886,11 +1308,12 @@ function DashHome() {
                 <span>{t("dash.colDir")}</span>
                 <span>{t("dash.colEntry")}</span>
                 <span>{t("dash.colCurrent")}</span>
+                <span>{t("dash.colSize")}</span>
                 <span>{t("dash.colPnl")}</span>
                 <span>{t("dash.colFrom")}</span>
               </div>
               {openPositions.map(pos => {
-                const c = (pos.pnlPct ?? 0) >= 0 ? "#4caf50" : "#ef5350";
+                const c = (pos.pnlPct ?? 0) >= 0 ? "var(--green)" : "var(--red)";
                 const s = (pos.pnlPct ?? 0) >= 0 ? "+" : "";
                 return (
                   <div className="positions-row" key={pos.signalId}>
@@ -898,6 +1321,7 @@ function DashHome() {
                     <span className={`pos-dir ${pos.direction}`}>{pos.direction.toUpperCase()} {pos.leverage}x</span>
                     <span className="pos-price">${pos.entryPrice < 1 ? pos.entryPrice.toPrecision(4) : pos.entryPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
                     <span className="pos-price">{pos.currentPrice !== undefined ? `$${pos.currentPrice < 1 ? pos.currentPrice.toPrecision(4) : pos.currentPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : "—"}</span>
+                    <span className="pos-price">${pos.positionUsd.toFixed(0)}</span>
                     <span style={{ color: c, fontVariantNumeric: "tabular-nums" }}>{s}{(pos.pnlPct ?? 0).toFixed(2)}%</span>
                     <span className="pos-peer">{pos.peer}</span>
                   </div>
@@ -911,30 +1335,80 @@ function DashHome() {
           )}
         </div>
 
-        {closedPositions.length > 0 && (
-          <div className="positions-card" style={{ marginTop: 12 }}>
+        {/* v4: demo positions from replay signals — physically separated so users
+            don't confuse the demo PnL with their real performance. */}
+        {demoPositions.length > 0 && (
+          <div className="positions-card" style={{ marginTop: 12, borderStyle: "dashed", borderColor: "var(--border-light, #333)" }}>
             <div className="section-header">
-              <span className="section-title">{t("dash.closedPositions")}</span>
-              <span style={{ fontSize: 11, color: "var(--ink-faint)" }}>{closedPositions.length}</span>
+              <span className="section-title" style={{ color: "var(--ink-soft)" }}>
+                {lang === "zh" ? "演示仓位" : "Demo positions"}
+                <span style={{ marginLeft: 8, fontSize: 10, color: "var(--ink-faint)", textTransform: "none", letterSpacing: 0 }}>
+                  {lang === "zh" ? "（不计入统计）" : "(not counted in stats)"}
+                </span>
+              </span>
+              <span style={{ fontSize: 11, color: "var(--ink-faint)" }}>{demoPositions.length}</span>
             </div>
             <div className="positions-table">
               <div className="positions-header">
                 <span>{t("dash.colToken")}</span>
                 <span>{t("dash.colDir")}</span>
                 <span>{t("dash.colEntry")}</span>
-                <span>{t("dash.colExit")}</span>
+                <span>{t("dash.colCurrent")}</span>
+                <span>{t("dash.colSize")}</span>
+                <span>{t("dash.colPnl")}</span>
+                <span>{t("dash.colFrom")}</span>
+              </div>
+              {demoPositions.map(pos => {
+                const c = (pos.pnlPct ?? 0) >= 0 ? "var(--green)" : "var(--red)";
+                const s = (pos.pnlPct ?? 0) >= 0 ? "+" : "";
+                return (
+                  <div className="positions-row" key={pos.signalId} style={{ opacity: 0.75 }}>
+                    <span className="pos-token">
+                      {pos.token.replace(/USDT$/, "")}
+                      <span style={{ marginLeft: 6, fontSize: 9, padding: "1px 5px", border: "1px dashed var(--ink-faint)", borderRadius: 3, color: "var(--ink-faint)", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+                        {lang === "zh" ? "演示" : "DEMO"}
+                      </span>
+                    </span>
+                    <span className={`pos-dir ${pos.direction}`}>{pos.direction.toUpperCase()} {pos.leverage}x</span>
+                    <span className="pos-price">${pos.entryPrice < 1 ? pos.entryPrice.toPrecision(4) : pos.entryPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
+                    <span className="pos-price">{pos.currentPrice !== undefined ? `$${pos.currentPrice < 1 ? pos.currentPrice.toPrecision(4) : pos.currentPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : "—"}</span>
+                    <span style={{ color: "var(--ink-faint)", fontVariantNumeric: "tabular-nums" }}>~${pos.positionUsd.toFixed(0)}</span>
+                    <span style={{ color: c, fontVariantNumeric: "tabular-nums" }}>{pos.pnlPct !== undefined ? `~${s}${pos.pnlPct.toFixed(2)}%` : "—"}</span>
+                    <span className="pos-peer">{pos.peer}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {closedPositions.length > 0 && (
+          <div className="positions-card" style={{ marginTop: 12 }}>
+            <div className="section-header">
+              <span className="section-title">{t("dash.closedPositions")}</span>
+              <span style={{ fontSize: 11, color: "var(--ink-faint)" }}>{closedPositions.length}</span>
+            </div>
+            <div className="positions-table closed-table">
+              <div className="positions-header">
+                <span>{t("dash.colToken")}</span>
+                <span>{t("dash.colDir")}</span>
+                <span>{t("dash.colPriceMove")}</span>
                 <span>{t("dash.colPnl")}</span>
                 <span>{t("dash.colReason")}</span>
               </div>
               {closedPositions.map(pos => {
-                const c = (pos.pnlPct ?? 0) >= 0 ? "#4caf50" : "#ef5350";
+                const c = (pos.pnlPct ?? 0) >= 0 ? "var(--green)" : "var(--red)";
                 const s = (pos.pnlPct ?? 0) >= 0 ? "+" : "";
+                const fmtPrice = (p: number) => p < 1 ? p.toPrecision(4) : p.toLocaleString(undefined, { maximumFractionDigits: 2 });
                 return (
                   <div className="positions-row" key={pos.signalId}>
                     <span className="pos-token">{pos.token.replace(/USDT$/, "")}</span>
                     <span className={`pos-dir ${pos.direction}`}>{pos.direction.toUpperCase()} {pos.leverage}x</span>
-                    <span className="pos-price">${pos.entryPrice < 1 ? pos.entryPrice.toPrecision(4) : pos.entryPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
-                    <span className="pos-price">${pos.exitPrice !== undefined ? (pos.exitPrice < 1 ? pos.exitPrice.toPrecision(4) : pos.exitPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })) : "—"}</span>
+                    <span className="pos-price-move">
+                      <span>${fmtPrice(pos.entryPrice)}</span>
+                      <span className="pos-arrow">→</span>
+                      <span>{pos.exitPrice !== undefined ? `$${fmtPrice(pos.exitPrice)}` : "—"}</span>
+                    </span>
                     <span style={{ color: c, fontVariantNumeric: "tabular-nums" }}>{s}{(pos.pnlPct ?? 0).toFixed(2)}%</span>
                     <span className="pos-peer" style={{ color: c }}>{pos.exitReason}</span>
                   </div>
@@ -980,6 +1454,14 @@ function FeedPage() {
     reactionsMap.set(f.parent_signal_id, list);
   }
 
+  // My action on each signal — for "why not opened" transparency
+  const myReactions = new Map<string, FeedItem>();
+  for (const f of feed) {
+    if (f.kind === "reaction" && f.from_address === auth.address && f.parent_signal_id) {
+      if (!myReactions.has(f.parent_signal_id)) myReactions.set(f.parent_signal_id, f);
+    }
+  }
+
   const filtered = feed.filter(f => {
     if (activeType === "reactions") return f.kind === "reaction";
     if (f.kind === "reaction" && f.parent_signal_id) return false;
@@ -992,19 +1474,40 @@ function FeedPage() {
       <div className="d-page-header">
         <div className="d-page-title">susurration / <strong>{t("feed.title")}</strong></div>
         <div className="header-actions">
+          <div className="filter-chips">
+            {["all", "signals", "reactions"].map((f) => (
+              <button key={f} className={`filter-chip ${activeType === f ? "active" : ""}`} onClick={() => setActiveType(f)}>
+                {t(`feed.${f}`)}
+              </button>
+            ))}
+          </div>
           <span style={{ fontSize: 11, color: "var(--ink-faint)" }}>{feed.length} {t("feed.items")}</span>
         </div>
       </div>
-      <div className="feed-mobile-tabs">
-        {["all", "signals", "reactions"].map((f) => (
-          <button key={f} className={`feed-mobile-tab ${activeType === f ? "active" : ""}`} onClick={() => setActiveType(f)}>
-            {t(`feed.${f}`)}
-          </button>
-        ))}
-      </div>
       <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
         <div className="feed-main">
-          {loading && <div style={{ padding: 24, color: "var(--ink-faint)", fontSize: 12 }}>{t("feed.loading")}</div>}
+          {loading && (
+            <>
+              {[0, 1, 2].map(i => (
+                <div className="signal-card-skeleton" key={i}>
+                  <div className="skel-head">
+                    <div className="skeleton-circle" style={{ width: 28, height: 28 }} />
+                    <div className="skeleton-line" style={{ width: 80, height: 12 }} />
+                    <div className="skeleton-line" style={{ width: 48, height: 10, marginLeft: "auto" }} />
+                  </div>
+                  <div className="skel-grid">
+                    {[0, 1, 2, 3, 4].map(j => (
+                      <div className="skel-cell" key={j}>
+                        <div className="skeleton-line" style={{ width: "60%", height: 8, marginBottom: 4 }} />
+                        <div className="skeleton-line" style={{ width: "80%", height: 10 }} />
+                      </div>
+                    ))}
+                  </div>
+                  <div className="skeleton-line" style={{ width: "100%", height: 24, borderRadius: 4 }} />
+                </div>
+              ))}
+            </>
+          )}
           {!loading && filtered.length === 0 && (
             <div style={{ padding: 24, color: "var(--ink-faint)", fontSize: 12, textAlign: "center" }}>{t("feed.empty")}</div>
           )}
@@ -1028,6 +1531,72 @@ function FeedPage() {
                     agrees={reactionCounts.get(item.signal_id!)?.agrees ?? 0}
                     against={reactionCounts.get(item.signal_id!)?.against ?? 0}
                   />
+                  {(() => {
+                    const sigType = p.type as string | undefined;
+                    if (sigType && sigType !== "trade_entry") {
+                      return (
+                        <div className="signal-action-row">
+                          <span className="action-badge exit-notice">{t("feed.exitNotice")}</span>
+                          {p.metadata?.exit_reason && <span className="action-note">{p.metadata.exit_reason}</span>}
+                          {p.metadata?.pnl_pct != null && (
+                            <span className={`action-note ${p.metadata.pnl_pct >= 0 ? "pnl-pos" : "pnl-neg"}`}>
+                              {p.metadata.pnl_pct >= 0 ? "+" : ""}{p.metadata.pnl_pct.toFixed(2)}%
+                            </span>
+                          )}
+                        </div>
+                      );
+                    }
+                    // Self-pushed signal: I'm the source, not the consumer.
+                    // Surface peer-reaction summary + any decision my own daemon made
+                    // on the SAME token in another channel (cross-channel correlation).
+                    if (item.from_address === auth.address) {
+                      const counts = item.signal_id ? reactionCounts.get(item.signal_id) : undefined;
+                      const agrees = counts?.agrees ?? 0;
+                      const against = counts?.against ?? 0;
+                      const token = (p.token ?? p.symbol) as string | undefined;
+                      const sigTs = new Date(item.created_at).getTime();
+                      let related: FeedItem | null = null;
+                      if (token) {
+                        for (const f of feed) {
+                          if (f.kind !== "reaction" || f.from_address !== auth.address) continue;
+                          if (!f.parent_signal_id || f.parent_signal_id === item.signal_id) continue;
+                          const parent = feed.find(s => s.kind === "signal" && s.signal_id === f.parent_signal_id);
+                          const parentToken = (parent?.payload?.token ?? parent?.payload?.symbol) as string | undefined;
+                          if (parentToken !== token) continue;
+                          const dt = Math.abs(new Date(f.created_at).getTime() - sigTs);
+                          if (dt > 30 * 60 * 1000) continue;
+                          related = f;
+                          break;
+                        }
+                      }
+                      const rv = related?.payload?.value;
+                      const relStatus = rv === "+1" ? "followed" : rv === "-1" ? "passed" : null;
+                      return (
+                        <div className="signal-action-row">
+                          <span className="action-badge sent">{t("feed.sent")}</span>
+                          <span className="action-note">{`${agrees} ${t("feed.followedShort")} / ${against} ${t("feed.passedShort")}`}</span>
+                          {relStatus && (
+                            <span className={`action-badge ${relStatus}`} title={related?.payload?.note ?? ""}>
+                              {t(`feed.daemon${relStatus === "followed" ? "Followed" : "Passed"}`)}
+                            </span>
+                          )}
+                          {related?.payload?.note && <span className="action-note">{related.payload.note}</span>}
+                        </div>
+                      );
+                    }
+                    const my = item.signal_id ? myReactions.get(item.signal_id) : null;
+                    const mp = my?.payload ?? {};
+                    const status = mp.value === "+1" ? "followed" : mp.value === "-1" ? "passed" : "no-action";
+                    return (
+                      <div className="signal-action-row">
+                        <span className={`action-badge ${status}`}>
+                          {t(`feed.${status === "followed" ? "followed" : status === "passed" ? "passed" : "noAction"}`)}
+                        </span>
+                        {my?.is_auto && <span className="action-auto">{t("feed.auto")}</span>}
+                        {mp.note && <span className="action-note">{mp.note}</span>}
+                      </div>
+                    );
+                  })()}
                   {reactions.length > 0 && (
                     <div className="signal-reactions">
                       {reactions.map(r => {
@@ -1068,30 +1637,6 @@ function FeedPage() {
             );
           })}
         </div>
-        <div className="feed-sidebar">
-          <div>
-            <div className="section-title" style={{ marginBottom: 10 }}>{t("feed.filter")}</div>
-            <div style={{ fontSize: 10, color: "var(--ink-faint)", letterSpacing: "0.8px", textTransform: "uppercase", marginBottom: 6 }}>{t("feed.type")}</div>
-            <div className="filter-chips">
-              {["all", "signals", "reactions"].map((f) => (
-                <button key={f} className={`filter-chip ${activeType === f ? "active" : ""}`} onClick={() => setActiveType(f)}>
-                  {t(`feed.${f}`)}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="feed-stat">
-            <div className="section-title" style={{ marginBottom: 4 }}>{t("feed.today")}</div>
-            <div className="feed-stat-row">
-              <span className="k">{t("feed.signalsReceived")}</span>
-              <span className="v">{feed.filter(f => f.kind === "signal").length}</span>
-            </div>
-            <div className="feed-stat-row">
-              <span className="k">{t("feed.yourReacts")}</span>
-              <span className="v">{feed.filter(f => f.kind === "reaction").length}</span>
-            </div>
-          </div>
-        </div>
       </div>
     </div>
   );
@@ -1105,6 +1650,7 @@ function FriendsPage() {
   const auth = useAuth();
   const [tab, setTab] = useState<"friends" | "groups">("friends");
   const [friends, setFriends] = useState<Friend[]>([]);
+  const [friendsLoaded, setFriendsLoaded] = useState(false);
   const [requests, setRequests] = useState<FriendRequest[]>([]);
   const [feed, setFeed] = useState<FeedItem[]>([]);
   const [prices, setPrices] = useState<Record<string, number>>({});
@@ -1124,7 +1670,7 @@ function FriendsPage() {
   const [inviteFb, setInviteFb] = useState<"idle" | "sending" | "sent" | "error">("idle");
 
   const reload = useCallback(() => {
-    apiFetch<{ friends: Friend[] }>("/friends").then(r => { setFriends(r.friends); if (tab === "friends" && !selected && r.friends.length) setSelected(r.friends[0]!.friend_username ?? r.friends[0]!.friend_address); }).catch(() => {});
+    apiFetch<{ friends: Friend[] }>("/friends").then(r => { setFriends(r.friends); setFriendsLoaded(true); if (tab === "friends" && !selected && r.friends.length) setSelected(r.friends[0]!.friend_username ?? r.friends[0]!.friend_address); }).catch(() => { setFriendsLoaded(true); });
     apiFetch<{ requests: FriendRequest[] }>("/friends/requests").then(r => setRequests(r.requests)).catch(() => {});
   }, [selected, tab]);
 
@@ -1257,7 +1803,7 @@ function FriendsPage() {
                   {addFeedback === "sending" ? "…" : addFeedback === "sent" ? t("friends.sent") : addFeedback === "error" ? addError.slice(0, 20) : t("friends.add")}
                 </button>
               </div>
-              {!friends.some(f => f.friend_username === "demo") && (
+              {friendsLoaded && !friends.some(f => f.friend_username === "demo") && (
                 <>
                   <div className="friends-section-label" style={{ marginBottom: 6 }}>{t("friends.recommended")}</div>
                   <div className="rec-friend-card">
@@ -1315,8 +1861,9 @@ function FriendsPage() {
             const acceptRate = friendSignals.length > 0 ? Math.round((acceptCount / friendSignals.length) * 100) : 0;
 
             const rawPositions = auth.address ? buildPositions(feed.filter(f => (f.kind === "signal" && f.from_username === friendHandle) || (f.kind === "reaction" && f.from_address === auth.address)), auth.address) : [];
-            const friendPositions = Object.keys(prices).length > 0 ? applyPrices(rawPositions, prices) : rawPositions;
-            const friendPnl = friendPositions.reduce((s, p) => s + (p.pnlUsd ?? 0), 0);
+            const friendPositionsResult = Object.keys(prices).length > 0 ? applyPrices(rawPositions, prices, new Map()) : { positions: rawPositions };
+            const friendPositions = friendPositionsResult.positions;
+            const friendPnl = friendPositions.reduce((s: number, p: Position) => s + (p.pnlUsd ?? 0), 0);
 
             return (
               <div className="friends-detail-col">
@@ -1340,7 +1887,7 @@ function FriendsPage() {
                       <div style={{ fontSize: 10, color: "var(--ink-faint)", marginTop: 2 }}>{t("friends.acceptRate")}</div>
                     </div>
                     <div className="friend-stat-cell" style={{ textAlign: "center" }}>
-                      <div style={{ fontSize: 16, fontWeight: 600, color: friendPnl > 0 ? "#4caf50" : friendPnl < 0 ? "#ef5350" : "var(--ink-faint)" }}>
+                      <div style={{ fontSize: 16, fontWeight: 600, color: friendPnl > 0 ? "var(--green)" : friendPnl < 0 ? "var(--red)" : "var(--ink-faint)" }}>
                         {friendPnl !== 0 ? `${friendPnl > 0 ? "+" : ""}$${Math.abs(friendPnl).toFixed(2)}` : "—"}
                       </div>
                       <div style={{ fontSize: 10, color: "var(--ink-faint)", marginTop: 2 }}>{t("friends.pnl")}</div>
@@ -1703,9 +2250,15 @@ export function DashboardPage() {
     const saved = localStorage.getItem("susu_page") as Page | null;
     return saved && ["dashboard", "feed", "friends", "mode", "settings"].includes(saved) ? saved : "dashboard";
   });
-  const setPagePersist = useCallback((p: Page) => { localStorage.setItem("susu_page", p); setPage(p); }, []);
+  const [hasNewActivity, setHasNewActivity] = useState(false);
+  const setPagePersist = useCallback((p: Page) => {
+    localStorage.setItem("susu_page", p);
+    if (p === "feed") { setHasNewActivity(false); localStorage.setItem("susu_feed_seen_at", Date.now().toString()); }
+    setPage(p);
+  }, []);
   const [visited, setVisited] = useState<Set<Page>>(() => new Set([page]));
   useEffect(() => { setVisited(v => v.has(page) ? v : new Set(v).add(page)); }, [page]);
+  useEffect(() => { if (!localStorage.getItem("susu_feed_seen_at")) localStorage.setItem("susu_feed_seen_at", Date.now().toString()); }, []);
 
   const authCtx: AuthCtx = {
     token: localStorage.getItem("susu_token"),
@@ -1716,9 +2269,10 @@ export function DashboardPage() {
   return (
     <AuthContext.Provider value={authCtx}>
       <NavContext.Provider value={setPagePersist}>
+        <ActivityBadgeContext.Provider value={{ setHasNew: setHasNewActivity }}>
         <div className="dash-shell">
           {showOnboarding && <Onboarding onComplete={() => setShowOnboarding(false)} />}
-          <Sidebar page={page} setPage={setPagePersist} />
+          <Sidebar page={page} setPage={setPagePersist} hasNewActivity={hasNewActivity} />
           <div className="dash-content">
             {visited.has("dashboard") && <div style={{ display: page === "dashboard" ? "flex" : "none", flexDirection: "column", height: "100%" }}><DashHome /></div>}
             {visited.has("feed") && <div style={{ display: page === "feed" ? "flex" : "none", flexDirection: "column", height: "100%" }}><FeedPage /></div>}
@@ -1726,7 +2280,9 @@ export function DashboardPage() {
             {visited.has("mode") && <div style={{ display: page === "mode" ? "flex" : "none", flexDirection: "column", height: "100%" }}><ModePage /></div>}
             {visited.has("settings") && <div style={{ display: page === "settings" ? "flex" : "none", flexDirection: "column", height: "100%" }}><SettingsPage onShowOnboarding={() => setShowOnboarding(true)} /></div>}
           </div>
+          <StatusBar />
         </div>
+        </ActivityBadgeContext.Provider>
       </NavContext.Provider>
     </AuthContext.Provider>
   );

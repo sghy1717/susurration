@@ -41,6 +41,16 @@ export type EventType =
   | "charge_attempted"
   | "charge_failed"
   | "client_error"
+  | "onboarding_event"
+  | "daemon_decision"
+  // v4 — one-shot installer + dashboard indicator + replay signal telemetry
+  | "installer_started"
+  | "installer_ide_detected"
+  | "installer_stage_tick"
+  | "installer_complete"
+  | "replay_signal_pushed"
+  | "dashboard_indicator_view"
+  | "dashboard_indicator_click"
   | "error";
 
 export interface RecordEventArgs {

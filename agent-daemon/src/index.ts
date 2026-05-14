@@ -44,7 +44,7 @@ import { PaperTrader } from "./paper_trading.ts";
 import { normalizeSignalPayload } from "./normalize.ts";
 import {
   pushSignal, pushReaction, recentSignals, feedSince,
-  reportClientError,
+  reportClientError, reportDaemonDecision, DAEMON_VERSION,
   type SusuClientConfig,
 } from "./susu_actions.ts";
 
@@ -551,6 +551,8 @@ async function handleEvent(
   cfg: DaemonConfig,
   paperTrader: PaperTrader | null,
 ): Promise<void> {
+  const decisionStartedAt = Date.now();
+
   // Skip expired signals — signals older than 1 hour are not actionable.
   // They remain in history as "missed" but the agent does not evaluate or act.
   if (evt.created_at) {
@@ -561,12 +563,21 @@ async function handleEvent(
         `[daemon] expired: ${evt.kind} ${(evt.signal_id ?? evt.reaction_id ?? "?").slice(0, 8)}… ` +
         `is ${ageMin}min old (>${Math.round(SIGNAL_EXPIRY_MS / 60_000)}min); skipped\n`,
       );
+      reportDaemonDecision(susu, {
+        kind: "error", error_type: "expired", event_kind: evt.kind,
+        signal_id: evt.signal_id ?? undefined,
+        context: { age_min: String(ageMin) },
+      });
       return;
     }
   }
 
   if (!limiter.tryConsume()) {
     process.stderr.write(`[daemon] rate-limited (>${cfg.agent.max_calls_per_minute}/min); skipping event\n`);
+    reportDaemonDecision(susu, {
+      kind: "error", error_type: "rate_limited", event_kind: evt.kind,
+      latency_ms: Date.now() - decisionStartedAt,
+    });
     return;
   }
   // Normalize signal payload before LLM and paper trading see it.
@@ -598,6 +609,7 @@ async function handleEvent(
   // ── LLM auth error cooldown ──────────────────────────────────────────
   if (llmAuthPausedUntil > Date.now()) {
     // Silently skip — banner already printed, waiting for cooldown.
+    reportDaemonDecision(susu, { kind: "error", error_type: "llm_paused", event_kind: evt.kind });
     return;
   }
 
@@ -639,6 +651,14 @@ async function handleEvent(
       process.stderr.write(`${"═".repeat(60)}\n\n`);
       llmAuthPausedUntil = Date.now() + LLM_AUTH_PAUSE_SECONDS * 1000;
     }
+    const errType = isLlmAuthError(msg) ? "llm_auth_error" : isLlmQuotaError(msg) ? "llm_quota_error" : "llm_error";
+    reportDaemonDecision(susu, {
+      kind: "error",
+      error_type: errType,
+      event_kind: evt.kind,
+      latency_ms: Date.now() - decisionStartedAt,
+      context: { provider: cfg.llm.provider ?? "unknown" },
+    });
     return;
   }
 
@@ -663,6 +683,20 @@ async function handleEvent(
   }
 
   await log.log({ ctx, decision, stats, result, error });
+
+  // Fire-and-forget decision telemetry — lets backend distinguish
+  // "silent daemon" (running but all noop) vs "dead daemon" (not connected).
+  reportDaemonDecision(susu, {
+    kind: error ? "error" : decision.kind,
+    signal_id: decision.kind === "react" ? decision.signal_id : undefined,
+    event_kind: evt.kind,
+    error_type: error ? "execute_failed" : undefined,
+    latency_ms: Date.now() - decisionStartedAt,
+    context: {
+      provider: cfg.llm.provider ?? "unknown",
+      model: cfg.llm.model ?? "unknown",
+    },
+  });
 
   // Built-in paper trading (in-process, zero overhead).
   // When the trigger is a reaction, paper trader needs the original signal's

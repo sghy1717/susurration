@@ -14,6 +14,10 @@ import { signalRoutes } from "./routes/signals.ts";
 import { billingRoutes } from "./routes/billing.ts";
 import { friendRoutes } from "./routes/friends.ts";
 import { clientErrorRoutes } from "./routes/client_errors.ts";
+import { onboardingEventRoutes } from "./routes/onboarding_events.ts";
+import { daemonEventRoutes } from "./routes/daemon_events.ts";
+import { installerEventRoutes } from "./routes/installer_events.ts";
+import { connectivityTestRoutes } from "./routes/connectivity_test.ts";
 import { adminRoutes } from "./routes/admin.ts";
 import { validateSolanaConfig } from "./lib/solana.ts";
 
@@ -91,7 +95,13 @@ app.use("/api/admin/reclaim-handle", bodyLimit({ maxSize: DEFAULT_BODY_MAX, onEr
 app.use("/api/admin/broadcast", bodyLimit({ maxSize: DEFAULT_BODY_MAX, onError: onTooLarge }));
 app.use("/api/admin/auto-accept", bodyLimit({ maxSize: DEFAULT_BODY_MAX, onError: onTooLarge }));
 app.use("/api/identity/auto-accept", bodyLimit({ maxSize: DEFAULT_BODY_MAX, onError: onTooLarge }));
+app.use("/api/positions/close", bodyLimit({ maxSize: DEFAULT_BODY_MAX, onError: onTooLarge }));
 app.use("/api/client-errors", bodyLimit({ maxSize: DEFAULT_BODY_MAX, onError: onTooLarge }));
+app.use("/api/installer/started", bodyLimit({ maxSize: DEFAULT_BODY_MAX, onError: onTooLarge }));
+app.use("/api/installer/ide-detected", bodyLimit({ maxSize: DEFAULT_BODY_MAX, onError: onTooLarge }));
+app.use("/api/installer/stage", bodyLimit({ maxSize: DEFAULT_BODY_MAX, onError: onTooLarge }));
+app.use("/api/installer/complete", bodyLimit({ maxSize: DEFAULT_BODY_MAX, onError: onTooLarge }));
+app.use("/api/connectivity-test/trigger", bodyLimit({ maxSize: DEFAULT_BODY_MAX, onError: onTooLarge }));
 
 // G3-R-1 fix v2: drain the body to a Buffer BEFORE the route handler runs.
 // Why: when chunked Transfer-Encoding overflows bodyLimit's stream wrapper,
@@ -133,6 +143,9 @@ import("./lib/rate_limit.ts").then(({ startGc }) => startGc());
 
 // GS PRO demo scanner — scans Binance every 60s, pushes signals as @demo.
 import("./lib/demo_scanner.ts").then(({ startDemoScanner }) => startDemoScanner());
+
+// Position closer — detects TP/SL/TIME/TRAIL closes server-side every 30s.
+import("./lib/position_closer.ts").then(({ startPositionCloser }) => startPositionCloser());
 
 // Overload protection: if event loop lag exceeds threshold, shed non-critical
 // requests with 503. SSE streams and /health are exempt.
@@ -219,6 +232,10 @@ api.route("/", channelRoutes);
 api.route("/", signalRoutes);
 api.route("/", billingRoutes);
 api.route("/", clientErrorRoutes);
+api.route("/", onboardingEventRoutes);
+api.route("/", daemonEventRoutes);
+api.route("/", installerEventRoutes);
+api.route("/", connectivityTestRoutes);
 // Admin routes registered BEFORE the catch-all so /api/admin/* doesn't 404.
 api.route("/", adminRoutes);
 // G7 P0 #1 follow-up: any unmatched /api/* must return JSON 404, NOT fall
@@ -238,7 +255,10 @@ const POST_ONLY_API_PATTERNS: RegExp[] = [
   /^\/channels\/[^/]+\/(invite|leave|kick|transfer-owner|signals)$/,
   /^\/signals\/[^/]+\/reactions$/,
   /^\/billing\/approve-tx$/,
+  /^\/positions\/close$/,
   /^\/client-errors$/,
+  /^\/installer\/(started|ide-detected|stage|complete)$/,
+  /^\/connectivity-test\/trigger$/,
   /^\/admin\/usernames$/,
   /^\/admin\/usernames\/[^/]+\/grant$/,
   /^\/admin\/reclaim-handle$/,
@@ -388,5 +408,10 @@ app.onError((err, c) => {
 
 export default {
   port: config.port,
+  // Explicit IPv4 binding — Bun's default has been seen to race with fly's
+  // post-deploy "is app listening on 0.0.0.0:8080" inspection. Forcing the
+  // hostname removes the warning and guarantees fly-proxy can reach us
+  // from the moment the machine reaches `started`.
+  hostname: "0.0.0.0",
   fetch: app.fetch,
 };

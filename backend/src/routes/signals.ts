@@ -1094,3 +1094,51 @@ signalRoutes.get("/prices", async (c) => {
   }
   return c.json({ prices: result });
 });
+
+// ── Position close persistence ──────────────────────────────────────────
+// Frontend computes TP/SL/TRAIL/TIME closes from live prices. Once a
+// position closes, POST here to make it permanent across refreshes/devices.
+
+signalRoutes.post("/positions/close", async (c) => {
+  let me: string;
+  try { me = await withAuth(c); } catch (e) { return authError(c, e); }
+
+  let body: any;
+  try { body = await c.req.json(); } catch (e) {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  const { signal_id, exit_reason, exit_price, exit_pnl_pct } = body;
+  if (typeof signal_id !== "string" || !signal_id) {
+    return c.json({ error: "signal_id must be a non-empty string" }, 400);
+  }
+  const VALID_REASONS = ["TP", "SL", "TIME", "TRAIL"];
+  if (!VALID_REASONS.includes(exit_reason)) {
+    return c.json({ error: `exit_reason must be one of ${VALID_REASONS.join(", ")}` }, 400);
+  }
+  if (typeof exit_price !== "number" || !Number.isFinite(exit_price)) {
+    return c.json({ error: "exit_price must be a finite number" }, 400);
+  }
+  if (typeof exit_pnl_pct !== "number" || !Number.isFinite(exit_pnl_pct)) {
+    return c.json({ error: "exit_pnl_pct must be a finite number" }, 400);
+  }
+
+  await sql`
+    INSERT INTO position_closes (signal_id, address, exit_reason, exit_price, exit_pnl_pct)
+    VALUES (${signal_id}, ${me}, ${exit_reason}, ${exit_price}, ${exit_pnl_pct})
+    ON CONFLICT (signal_id, address) DO NOTHING
+  `;
+  return c.json({ ok: true });
+});
+
+signalRoutes.get("/positions/closed", async (c) => {
+  let me: string;
+  try { me = await withAuth(c); } catch (e) { return authError(c, e); }
+
+  const rows = await sql`
+    SELECT signal_id, exit_reason, exit_price, exit_pnl_pct, closed_at
+    FROM position_closes
+    WHERE address = ${me}
+    ORDER BY closed_at DESC
+  `;
+  return c.json({ closes: rows });
+});

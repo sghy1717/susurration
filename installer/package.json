@@ -1,0 +1,30 @@
+{
+  "name": "@susurration/installer",
+  "version": "0.0.2",
+  "description": "One-shot installer: detects your AI IDEs, wires up Susurration MCP, installs the agent daemon, and starts it. Run via npx after registering at https://susurration.xyz.",
+  "type": "module",
+  "bin": {
+    "installer": "bin/susu-installer.mjs",
+    "susu-installer": "bin/susu-installer.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "build": "bun build src/index.ts --outfile bin/susu-installer.mjs --target node --format esm --banner '#!/usr/bin/env node'"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": ["susurration", "agent", "trading", "mcp", "installer"],
+  "license": "MIT",
+  "repository": "github:sghy1717/susurration"
+}

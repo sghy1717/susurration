@@ -84,6 +84,7 @@ type BinanceExchangeSymbol = { symbol: string; contractType: string; quoteAsset:
 
 interface ScanSignal {
   symbol: string;
+  direction: "long" | "short";
   price: number;
   priceChg24h: number;
   volume: number;
@@ -118,22 +119,29 @@ async function scan(): Promise<ScanSignal[]> {
     return [];
   }
 
-  const justFlipped: string[] = [];
+  // Bidirectional FR flip detection (mirror of local GS-pro scanner_paper.py):
+  //   prev > 0, curr < 0 → LONG candidate (shorts piled, squeeze)
+  //   prev < 0, curr > 0 → SHORT candidate (longs piled, squeeze)
+  const justFlipped: Array<[string, "long" | "short"]> = [];
   for (const sym of symbols) {
     const prev = prevSnap[sym];
     const curr = frCurrent[sym];
-    if (prev !== undefined && curr !== undefined && prev > 0 && curr < 0) {
-      justFlipped.push(sym);
-    }
+    if (prev === undefined || curr === undefined) continue;
+    if (prev > 0 && curr < 0) justFlipped.push([sym, "long"]);
+    else if (prev < 0 && curr > 0) justFlipped.push([sym, "short"]);
   }
 
   if (justFlipped.length === 0) return [];
-  console.log(`[demo-scanner] FR flipped: ${justFlipped.join(", ")}`);
+  console.log(`[demo-scanner] FR flipped: ${justFlipped.map(([s, d]) => `${s}(${d})`).join(", ")}`);
 
   const signals: ScanSignal[] = [];
-  for (const sym of justFlipped) {
+  for (const [sym, sigDir] of justFlipped) {
     // Dedup
-    const lastAlert = alertHistory[sym];
+    // Dedup by (symbol, direction) — matches scanner_paper.py behavior.
+    // LONG-then-SHORT (or vice versa) within 24h represents real structural
+    // reversal and should NOT be dedup'd as same alert.
+    const dedupKey = `${sym}:${sigDir}`;
+    const lastAlert = alertHistory[dedupKey];
     if (lastAlert && Date.now() - lastAlert < DEDUP_HOURS * 3600_000) continue;
 
     const oiHist = await fetchJson<BinanceOIHist[]>(
@@ -160,6 +168,7 @@ async function scan(): Promise<ScanSignal[]> {
     const t = tickerMap[sym] ?? {};
     signals.push({
       symbol: sym,
+      direction: sigDir,
       price: parseFloat(t.lastPrice ?? "0"),
       priceChg24h: parseFloat(t.priceChangePercent ?? "0"),
       volume: parseFloat(t.quoteVolume ?? "0"),
@@ -168,7 +177,7 @@ async function scan(): Promise<ScanSignal[]> {
       currentFr: frCurrent[sym] ?? 0,
       prevFr: prevSnap[sym] ?? 0,
     });
-    alertHistory[sym] = Date.now();
+    alertHistory[dedupKey] = Date.now();
   }
 
   return signals;
@@ -181,8 +190,14 @@ function buildPayload(sig: ScanSignal) {
   const oiScore = Math.min(Math.max((sig.oiChangePct - 8) / 25, 0), 1);
   const confidence = Math.round(Math.min(Math.max(0.4 + 0.3 * oiScore, 0.4), 0.9) * 100) / 100;
 
+  const isShort = sig.direction === "short";
+  // Mirror local scanner_paper.py SL/TP convention (8% SL / 12% TP):
+  //   LONG  : SL below entry,  TP above entry
+  //   SHORT : SL above entry,  TP below entry
+  const sl = isShort ? sig.price * 1.08 : sig.price * 0.92;
+  const tp = isShort ? sig.price * 0.88 : sig.price * 1.12;
   return {
-    direction: "long",
+    direction: sig.direction,
     token: sig.symbol,
     confidence,
     horizon: "swing",
@@ -190,8 +205,8 @@ function buildPayload(sig: ScanSignal) {
     source_id: SOURCE_ID,
     metadata: {
       entry_price: sig.price,
-      stop_loss: Math.round(sig.price * 0.92 * 1e8) / 1e8,
-      take_profit: Math.round(sig.price * 1.12 * 1e8) / 1e8,
+      stop_loss: Math.round(sl * 1e8) / 1e8,
+      take_profit: Math.round(tp * 1e8) / 1e8,
       leverage: 3,
       time_stop_hours: 48,
       raw_signal: {
