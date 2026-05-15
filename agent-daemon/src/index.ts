@@ -92,6 +92,14 @@ interface DaemonConfig {
   /** Path for local event log (all SSE events, not just decisions).
    *  Used by `susu feed` to display history without a second SSE connection. */
   event_log_path?: string;
+  /** Phase 14 G #1 — Privacy opt-in. When TRUE, daemon uploads its LLM
+   *  decision `note` (capped 500 chars, secrets redacted) to Susurration
+   *  server's `daemon_decisions` table. Lets you see decision history
+   *  cross-device on dashboard. When FALSE (default), only react/push/noop
+   *  metadata is shared (the kind, signal_id, latency); the note string
+   *  stays local in `~/.susu/agent-decisions.jsonl`.
+   *  Default: false (your LLM reasoning is your alpha; opt-in to share). */
+  share_reasoning_summary?: boolean;
 }
 
 function parseArgs(argv: string[]): { config?: string; once?: boolean } {
@@ -694,13 +702,17 @@ async function handleEvent(
   // Fire-and-forget decision telemetry — lets backend distinguish
   // "silent daemon" (running but all noop) vs "dead daemon" (not connected).
   // Phase 11b — also writes plaintext to /daemon_decisions for cross-device
-  // user-visible decision history (with reasoning_summary capped 500 chars).
+  // user-visible decision history.
+  // Phase 14 G #1 — reasoning_summary is OPT-IN via cfg.share_reasoning_summary.
+  // Default false: only metadata + kind shared; LLM `note` stays local.
+  // True: daemon uploads note (capped 500 chars, secrets redacted server-side).
   const decisionAny = decision as any;
-  const reasoningSummary: string | undefined =
-    typeof decisionAny?.payload?.note === "string" ? decisionAny.payload.note :
-    typeof decisionAny?.note === "string" ? decisionAny.note :
-    typeof decisionAny?.reasoning === "string" ? decisionAny.reasoning :
-    undefined;
+  const reasoningSummary: string | undefined = cfg.share_reasoning_summary
+    ? (typeof decisionAny?.payload?.note === "string" ? decisionAny.payload.note :
+       typeof decisionAny?.note === "string" ? decisionAny.note :
+       typeof decisionAny?.reasoning === "string" ? decisionAny.reasoning :
+       undefined)
+    : undefined;
   const reactionId = (result as any)?.reaction_id ?? undefined;
   reportDaemonDecision(susu, {
     kind: error ? "error" : decision.kind,
@@ -713,7 +725,7 @@ async function handleEvent(
     latency_ms: Date.now() - decisionStartedAt,
     llm_provider: cfg.llm.provider,
     llm_model: cfg.llm.model,
-    reasoning_summary: reasoningSummary,
+    reasoning_summary: reasoningSummary,  // undefined when opt-out
     context: {
       provider: cfg.llm.provider ?? "unknown",
       model: cfg.llm.model ?? "unknown",

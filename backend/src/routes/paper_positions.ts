@@ -66,6 +66,23 @@ paperPositionsRoutes.post("/paper_positions/open", async (c) => {
     if (!Number.isFinite(v)) return c.json({ error: `${name} must be a finite number` }, 400);
   }
 
+  // Phase 14 G #2 — verify caller is a member of channel + signal exists in
+  // that channel. Without this check, anyone with a valid token can flood
+  // their own paper_positions table with fake rows referencing arbitrary
+  // signal/channel IDs (rate-limited to 17万/day/user but still attack surface).
+  // FK on migration 019 catches non-existent signal_id; this catches "valid
+  // signal but caller isn't a member of its channel".
+  const auth = await sql<{ ok: boolean }[]>`
+    SELECT 1::int AS ok
+    FROM signals s
+    JOIN channel_members cm ON cm.channel_id = s.channel_id AND cm.address = ${me}
+    WHERE s.signal_id = ${signal_id} AND s.channel_id = ${channel_id}
+    LIMIT 1
+  `;
+  if (!auth[0]) {
+    return c.json({ error: "signal_not_in_caller_channel" }, 403);
+  }
+
   // Idempotent insert — daemon may retry on transient network failure.
   const rows = await sql<{ position_id: string; opened_at: Date }[]>`
     INSERT INTO paper_positions (

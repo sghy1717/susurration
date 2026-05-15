@@ -59,11 +59,14 @@ export async function ensureDemoFriend(meAddress: string, meUsername: string | n
 
   // Replay signal — query @demo's most-recent real trade signal in last 24h.
   // Done outside tx (read-only) so we know whether to insert a replay row inside the tx.
+  // Phase 14 G 🟡 — was sql.unsafe(String(...)); replaced with parameterized
+  // make_interval to eliminate the SQL injection sink (current value is a const
+  // so safe today, but the pattern was a footgun for future edits).
   const replayCandidate = await sql<{ payload: any; signal_id: string; created_at: Date }[]>`
     SELECT signal_id, payload, created_at
     FROM signals
     WHERE from_address = ${demoAddress}
-      AND created_at > now() - interval '${sql.unsafe(String(REPLAY_LOOKBACK_HOURS))} hours'
+      AND created_at > now() - make_interval(hours => ${REPLAY_LOOKBACK_HOURS})
       AND payload->>'source_id' LIKE 'GS-pro%'
     ORDER BY created_at DESC
     LIMIT 1
@@ -198,6 +201,10 @@ export async function ensureDemoFriend(meAddress: string, meUsername: string | n
     };
     publishChannel(channelId, rEvt);
     void deliverToChannelMembers(channelId, demoAddress, rEvt);
+    // Phase 14 G 🟡 — was logging token + direction in events payload, breaking
+    // events table "only hashed PII / no business content" convention.
+    // signal_id chain alone is sufficient for funnel analysis (admin can join
+    // signals table to enrich if ever needed).
     recordEvent({
       type: "replay_signal_pushed",
       channelId,
@@ -205,8 +212,6 @@ export async function ensureDemoFriend(meAddress: string, meUsername: string | n
         replay_signal_id: replayRow.signal_id,
         source_signal_id: replayCandidate[0].signal_id,
         original_created_at: replayCandidate[0].created_at.toISOString(),
-        token: original?.token ?? null,
-        direction: original?.direction ?? null,
       },
     });
   }

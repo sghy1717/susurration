@@ -46,12 +46,31 @@ daemonDecisionsRoutes.post("/daemon_decisions", async (c) => {
   const llm_model = body?.llm_model != null ? String(body.llm_model).slice(0, 60) : null;
   const latency_ms = Number.isFinite(Number(body?.latency_ms)) ? Math.floor(Number(body.latency_ms)) : null;
   const error_type = body?.error_type != null ? String(body.error_type).slice(0, 40) : null;
-  // Cap reasoning_summary at 500 chars — user opt-in via daemon config
-  // share_reasoning_with_server: true (default). Storing here means cross-device
-  // visibility but server can read.
+  // Phase 14 G #1 — reasoning_summary is OPT-IN at the daemon side
+  // (DaemonConfig.share_reasoning_summary, default false). When opt-out,
+  // daemon sends NO reasoning_summary field; this server endpoint just
+  // stores whatever arrives (cap 500 chars defensively in case daemon misbehaves).
+  // Server cannot enforce opt-in; client-side daemon code controls disclosure.
   const reasoning_summary = body?.reasoning_summary != null
     ? String(body.reasoning_summary).slice(0, 500) : null;
   const created_at = body?.created_at ? String(body.created_at) : null;
+
+  // Phase 14 G #2 — if signal_id provided, verify caller is in that signal's
+  // channel. Without check, attacker can write decisions referencing any
+  // signal id. signal_id is nullable (e.g. error events with no source) so
+  // skip check when null.
+  if (signal_id) {
+    const auth = await sql<{ ok: boolean }[]>`
+      SELECT 1::int AS ok
+      FROM signals s
+      JOIN channel_members cm ON cm.channel_id = s.channel_id AND cm.address = ${me}
+      WHERE s.signal_id = ${signal_id}
+      LIMIT 1
+    `;
+    if (!auth[0]) {
+      return c.json({ error: "signal_not_in_caller_channel" }, 403);
+    }
+  }
 
   const rows = await sql<{ decision_id: string }[]>`
     INSERT INTO daemon_decisions (

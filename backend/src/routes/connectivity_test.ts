@@ -73,11 +73,12 @@ connectivityTestRoutes.post("/connectivity-test/trigger", async (c) => {
 
   // Pull @demo's most-recent real trade signal in the lookback window.
   // Excludes welcome (source_id='demo-welcome') by filtering for GS-pro source_id.
+  // Phase 14 G 🟡 — sql.unsafe replaced with parameterized make_interval.
   const candidate = await sql<{ signal_id: string; payload: any; created_at: Date }[]>`
     SELECT signal_id, payload, created_at
     FROM signals
     WHERE from_address = ${demoAddress}
-      AND created_at > now() - interval '${sql.unsafe(String(REPLAY_LOOKBACK_HOURS))} hours'
+      AND created_at > now() - make_interval(hours => ${REPLAY_LOOKBACK_HOURS})
       AND payload->>'source_id' LIKE 'GS-pro%'
       AND (payload->>'connectivity_test') IS NULL
     ORDER BY created_at DESC

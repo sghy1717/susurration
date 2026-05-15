@@ -250,8 +250,13 @@ function buildPositions(feed: FeedItem[], myAddress: string): Position[] {
     const isShort = norm.direction === "short";
     const sl = norm.stopLoss ?? norm.entryPrice! * (isShort ? 1.08 : 0.92);
     const tp = norm.takeProfit ?? norm.entryPrice! * (isShort ? 0.88 : 1.12);
-    const sizeFactor = typeof f.payload?.size_factor === "number" ? f.payload.size_factor : 0.7;
-    const positionUsd = 1000 * 0.3 * sizeFactor;
+    // Phase 14 G #3 — was hardcoded `1000 * 0.3 * sizeFactor` baseline, which
+    // showed wrong USD figures for users on old daemons (server paper_positions
+    // empty → fallback to feed-derived → fake $ values misled users about real
+    // PnL). positionUsd=0 here signals "not synced from server"; UI must check
+    // and display "% only / $ pending sync" instead of fake dollar amount.
+    // After daemon v0.0.15 user upgrade + sync, server positions take over and
+    // include real position_usd from the daemon's own balance computation.
 
     positions.push({
       token: norm.token!,
@@ -264,7 +269,7 @@ function buildPositions(feed: FeedItem[], myAddress: string): Position[] {
       signalId: parentId,
       openedAt: sig.created_at,
       status: "open",
-      positionUsd,
+      positionUsd: 0,  // 0 = not synced, UI shows "$ pending sync"
       isReplay: sig.payload?.replay === true,
     });
   }
@@ -1528,27 +1533,35 @@ function FeedPage() {
       .finally(() => setLoading(false));
   }, []);
 
-  // Build reaction counts + grouped reactions per signal
-  const reactionCounts = new Map<string, { agrees: number; against: number }>();
-  const reactionsMap = new Map<string, FeedItem[]>();
-  for (const f of feed) {
-    if (f.kind !== "reaction" || !f.parent_signal_id) continue;
-    const c = reactionCounts.get(f.parent_signal_id) ?? { agrees: 0, against: 0 };
-    if (f.payload?.value === "+1") c.agrees++;
-    else if (f.payload?.value === "-1") c.against++;
-    reactionCounts.set(f.parent_signal_id, c);
-    const list = reactionsMap.get(f.parent_signal_id) ?? [];
-    list.push(f);
-    reactionsMap.set(f.parent_signal_id, list);
-  }
+  // Phase 14 G #4 — was rebuilding all 3 Maps on every render (input typing
+  // anywhere in tree triggered O(N) re-walks of feed). useMemo([feed]) caches
+  // until feed changes (every 30s poll or SSE).
+  const { reactionCounts, reactionsMap } = React.useMemo(() => {
+    const counts = new Map<string, { agrees: number; against: number }>();
+    const map = new Map<string, FeedItem[]>();
+    for (const f of feed) {
+      if (f.kind !== "reaction" || !f.parent_signal_id) continue;
+      const c = counts.get(f.parent_signal_id) ?? { agrees: 0, against: 0 };
+      if (f.payload?.value === "+1") c.agrees++;
+      else if (f.payload?.value === "-1") c.against++;
+      counts.set(f.parent_signal_id, c);
+      const list = map.get(f.parent_signal_id) ?? [];
+      list.push(f);
+      map.set(f.parent_signal_id, list);
+    }
+    return { reactionCounts: counts, reactionsMap: map };
+  }, [feed]);
 
   // My action on each signal — for "why not opened" transparency
-  const myReactions = new Map<string, FeedItem>();
-  for (const f of feed) {
-    if (f.kind === "reaction" && f.from_address === auth.address && f.parent_signal_id) {
-      if (!myReactions.has(f.parent_signal_id)) myReactions.set(f.parent_signal_id, f);
+  const myReactions = React.useMemo(() => {
+    const m = new Map<string, FeedItem>();
+    for (const f of feed) {
+      if (f.kind === "reaction" && f.from_address === auth.address && f.parent_signal_id) {
+        if (!m.has(f.parent_signal_id)) m.set(f.parent_signal_id, f);
+      }
     }
-  }
+    return m;
+  }, [feed, auth.address]);
 
   // Phase 10 D7 — channel structural events come through feed REST query as
   // these distinct kinds. Filter logic + render branch handles them.
