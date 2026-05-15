@@ -1339,14 +1339,23 @@ function DashHome() {
   const realPositions = positions.filter(p => !p.isReplay);
   const totalPnl = realPositions.reduce((s, p) => s + (p.pnlUsd ?? 0), 0);
   const totalCapital = realPositions.reduce((s, p) => s + p.positionUsd, 0);
-  const totalPnlPct = totalCapital > 0 ? (totalPnl / totalCapital) * 100 : 0;
+  // Phase 14 G #3 — totalPnlPct uses % directly from positions (which DO have
+  // real pnlPct from price math) so we can show meaningful % even when
+  // positionUsd=0 (feed-derived fallback before daemon syncs to server).
+  const realPnlPctSum = realPositions.reduce((s, p) => s + (p.pnlPct ?? 0), 0);
+  const realPnlPctAvg = realPositions.length > 0 ? realPnlPctSum / realPositions.length : 0;
+  const totalPnlPct = totalCapital > 0 ? (totalPnl / totalCapital) * 100 : realPnlPctAvg;
   const openPositions = realPositions.filter(p => p.status === "open").sort((a, b) => Math.abs(b.pnlPct ?? 0) - Math.abs(a.pnlPct ?? 0));
   const closedPositions = realPositions.filter(p => p.status === "closed").sort((a, b) => Math.abs(b.pnlPct ?? 0) - Math.abs(a.pnlPct ?? 0));
   const demoPositions = positions.filter(p => p.isReplay).sort((a, b) => Math.abs(b.pnlPct ?? 0) - Math.abs(a.pnlPct ?? 0));
   const hasPositions = realPositions.length > 0;
+  // Phase 15 — fallback detection: if all real positions have positionUsd=0
+  // it means daemon hasn't synced to server yet (old daemon or new device
+  // first-load). Show "% only / $ pending sync" instead of fake $0.00.
+  const isPendingSync = hasPositions && totalCapital === 0;
 
-  const pnlColor = totalPnl > 0 ? "var(--green)" : totalPnl < 0 ? "var(--red)" : "var(--ink-faint)";
-  const pnlSign = totalPnl > 0 ? "+" : totalPnl < 0 ? "-" : "";
+  const pnlColor = totalPnlPct > 0 ? "var(--green)" : totalPnlPct < 0 ? "var(--red)" : "var(--ink-faint)";
+  const pnlSign = totalPnlPct > 0 ? "+" : totalPnlPct < 0 ? "-" : "";
 
   return (
     <div className="d-page active" style={{ display: "flex" }}>
@@ -1367,10 +1376,32 @@ function DashHome() {
             <div className="stat-label">{t("dash.pnl")} <span style={{ textTransform: "none", letterSpacing: 0, opacity: 0.7 }}>· {t("dash.fromSignals")}</span></div>
             {hasPositions && pricesLoaded ? (
               <>
-                <div className="stat-value" style={{ color: pnlColor }}>{pnlSign}${Math.abs(totalPnl).toFixed(2)} <span style={{ fontSize: 14, color: pnlColor }}>({pnlSign}{Math.abs(totalPnlPct).toFixed(1)}%)</span></div>
-                <div className="stat-sub" style={{ fontSize: 10, color: "var(--ink-faint)" }}>
-                  {openPositions.length} {t("dash.posOpen")} · {closedPositions.length} {t("dash.posClosed")}
-                </div>
+                {/* Phase 15 — pending-sync fallback: show % avg only + hint
+                    when daemon hasn't synced position_usd to server yet. */}
+                {isPendingSync ? (
+                  <>
+                    <div className="stat-value" style={{ color: pnlColor }}>
+                      {pnlSign}{Math.abs(totalPnlPct).toFixed(1)}%
+                      <span style={{ fontSize: 11, color: "var(--ink-faint)", marginLeft: 8, fontWeight: 400 }}>
+                        · {lang === "zh" ? "$ 待同步" : "$ pending sync"}
+                      </span>
+                    </div>
+                    <div className="stat-sub" style={{ fontSize: 10, color: "var(--ink-faint)" }}>
+                      {openPositions.length} {t("dash.posOpen")} · {closedPositions.length} {t("dash.posClosed")}
+                      {" · "}
+                      <span title={lang === "zh" ? "升级 daemon 到 0.0.16+ 后跨设备同步美元金额" : "Upgrade daemon to 0.0.16+ for cross-device USD sync"}>
+                        {lang === "zh" ? "升级 daemon 看 $" : "upgrade daemon for $"}
+                      </span>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="stat-value" style={{ color: pnlColor }}>{pnlSign}${Math.abs(totalPnl).toFixed(2)} <span style={{ fontSize: 14, color: pnlColor }}>({pnlSign}{Math.abs(totalPnlPct).toFixed(1)}%)</span></div>
+                    <div className="stat-sub" style={{ fontSize: 10, color: "var(--ink-faint)" }}>
+                      {openPositions.length} {t("dash.posOpen")} · {closedPositions.length} {t("dash.posClosed")}
+                    </div>
+                  </>
+                )}
               </>
             ) : (
               <div className="stat-value" style={{ color: "var(--ink-faint)" }}>—</div>

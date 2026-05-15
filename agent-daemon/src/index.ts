@@ -92,13 +92,15 @@ interface DaemonConfig {
   /** Path for local event log (all SSE events, not just decisions).
    *  Used by `susu feed` to display history without a second SSE connection. */
   event_log_path?: string;
-  /** Phase 14 G #1 — Privacy opt-in. When TRUE, daemon uploads its LLM
-   *  decision `note` (capped 500 chars, secrets redacted) to Susurration
-   *  server's `daemon_decisions` table. Lets you see decision history
-   *  cross-device on dashboard. When FALSE (default), only react/push/noop
-   *  metadata is shared (the kind, signal_id, latency); the note string
-   *  stays local in `~/.susu/agent-decisions.jsonl`.
-   *  Default: false (your LLM reasoning is your alpha; opt-in to share). */
+  /** Phase 15 — Privacy opt-out (was opt-in in Phase 14, flipped per Haze
+   *  product decision: cross-device decision history is too useful to leave
+   *  off by default).
+   *  When TRUE (DEFAULT), daemon uploads its LLM decision `note` (capped
+   *  500 chars, secrets redacted) to server's `daemon_decisions` table.
+   *  Lets you see decision history on any device's dashboard.
+   *  When FALSE, only react/push/noop metadata is shared (kind, signal_id,
+   *  latency); the LLM reasoning stays local in agent-decisions.jsonl.
+   *  Set to false if you want to keep your LLM reasoning fully local. */
   share_reasoning_summary?: boolean;
 }
 
@@ -703,11 +705,13 @@ async function handleEvent(
   // "silent daemon" (running but all noop) vs "dead daemon" (not connected).
   // Phase 11b — also writes plaintext to /daemon_decisions for cross-device
   // user-visible decision history.
-  // Phase 14 G #1 — reasoning_summary is OPT-IN via cfg.share_reasoning_summary.
-  // Default false: only metadata + kind shared; LLM `note` stays local.
-  // True: daemon uploads note (capped 500 chars, secrets redacted server-side).
+  // Phase 15 — reasoning_summary OPT-OUT (default TRUE per Haze product decision).
+  // Set cfg.share_reasoning_summary = false to keep LLM note fully local.
+  // Default behavior: daemon uploads note (capped 500 chars + secrets redacted
+  // server-side) so dashboard shows decision history on any device.
+  const shareReasoning = cfg.share_reasoning_summary !== false;  // default true
   const decisionAny = decision as any;
-  const reasoningSummary: string | undefined = cfg.share_reasoning_summary
+  const reasoningSummary: string | undefined = shareReasoning
     ? (typeof decisionAny?.payload?.note === "string" ? decisionAny.payload.note :
        typeof decisionAny?.note === "string" ? decisionAny.note :
        typeof decisionAny?.reasoning === "string" ? decisionAny.reasoning :
