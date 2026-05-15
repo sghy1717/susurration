@@ -20,6 +20,7 @@ import { installerEventRoutes } from "./routes/installer_events.ts";
 import { connectivityTestRoutes } from "./routes/connectivity_test.ts";
 import { paperPositionsRoutes } from "./routes/paper_positions.ts";
 import { daemonDecisionsRoutes } from "./routes/daemon_decisions.ts";
+import { daemonMetaRoutes } from "./routes/daemon_meta.ts";
 import { adminRoutes } from "./routes/admin.ts";
 import { validateSolanaConfig } from "./lib/solana.ts";
 
@@ -243,6 +244,7 @@ api.route("/", installerEventRoutes);
 api.route("/", connectivityTestRoutes);
 api.route("/", paperPositionsRoutes);
 api.route("/", daemonDecisionsRoutes);
+api.route("/", daemonMetaRoutes);
 // Admin routes registered BEFORE the catch-all so /api/admin/* doesn't 404.
 api.route("/", adminRoutes);
 // G7 P0 #1 follow-up: any unmatched /api/* must return JSON 404, NOT fall

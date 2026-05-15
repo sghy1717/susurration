@@ -850,8 +850,19 @@ signalRoutes.get("/signals/feed/stream", async (c) => {
   const handle = handleRow[0]?.username ? `@${handleRow[0].username}` : logAddr(me);
   console.log(`[sse:feed] connect ${handle} channels=${channelMeta.size}`);
 
-  // Mark daemon as connected on SSE join
-  sql`UPDATE identities SET last_daemon_ping_at = now() WHERE address = ${me}`.catch(() => {});
+  // Mark daemon as connected on SSE join + extract daemon version from
+  // User-Agent header (Phase 16 — `susurration-agent-daemon/X.Y.Z`).
+  // Web SPA's EventSource also hits this endpoint with browser UA — the
+  // regex only matches the daemon's UA so non-daemon connects don't pollute
+  // identity.last_daemon_version. Fire-and-forget; failures don't block SSE.
+  const ua = c.req.header("user-agent") ?? "";
+  const daemonVersionMatch = ua.match(/susurration-agent-daemon\/(\d+\.\d+\.\d+)/);
+  if (daemonVersionMatch) {
+    const daemonVer = daemonVersionMatch[1]!.slice(0, 20);
+    sql`UPDATE identities SET last_daemon_ping_at = now(), last_daemon_version = ${daemonVer} WHERE address = ${me}`.catch(() => {});
+  } else {
+    sql`UPDATE identities SET last_daemon_ping_at = now() WHERE address = ${me}`.catch(() => {});
+  }
 
   return streamSSE(c, async (stream) => {
     let aborted = false;

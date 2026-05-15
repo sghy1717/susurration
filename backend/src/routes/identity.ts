@@ -81,8 +81,8 @@ identityRoutes.post("/auth/stream-token", async (c) => {
 identityRoutes.get("/identity/whoami", async (c) => {
   try {
     const address = await authedAddress(c.req.header("authorization"));
-    const rows = await sql<{ address: string; username: string | null; auto_accept_friends: boolean; created_at: Date; last_mcp_ping_at: Date | null; last_daemon_ping_at: Date | null }[]>`
-      SELECT address, username, auto_accept_friends, created_at, last_mcp_ping_at, last_daemon_ping_at
+    const rows = await sql<{ address: string; username: string | null; auto_accept_friends: boolean; created_at: Date; last_mcp_ping_at: Date | null; last_daemon_ping_at: Date | null; last_daemon_version: string | null }[]>`
+      SELECT address, username, auto_accept_friends, created_at, last_mcp_ping_at, last_daemon_ping_at, last_daemon_version
       FROM identities WHERE address = ${address}
     `;
     return c.json(rows[0] ?? { address, username: null });

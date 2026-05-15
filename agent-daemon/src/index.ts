@@ -481,8 +481,13 @@ async function runOneStream(
   signal?: AbortSignal,
 ): Promise<void> {
   const url = susu.api_url.replace(/\/$/, "") + "/signals/feed/stream";
+  // Phase 16 — User-Agent reports daemon version so backend can update
+  // identity.last_daemon_version for dashboard upgrade banner.
   const resp = await fetch(url, {
-    headers: { authorization: `Bearer ${susu.token}` },
+    headers: {
+      authorization: `Bearer ${susu.token}`,
+      "user-agent": `susurration-agent-daemon/${DAEMON_VERSION}`,
+    },
     signal,
   });
   if (resp.status === 401 || resp.status === 403) {

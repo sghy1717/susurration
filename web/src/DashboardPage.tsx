@@ -1009,6 +1009,148 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
 }
 
 // ════════════════════════════════════════════════════════
+//   UPGRADE BANNER (Phase 16)
+// ════════════════════════════════════════════════════════
+// Sticky top-center pill that appears only when the caller's daemon is on
+// an older version than npm latest. Click → copies the installer command to
+// clipboard so user can paste-and-run in terminal.
+//
+// Server-side: identity.last_daemon_version (set on SSE connect via UA header)
+//   vs GET /api/daemon/latest-version (cached npm registry fetch).
+// Future Phase 17: real one-click via daemon localhost endpoint.
+
+function semverLT(a: string, b: string): boolean {
+  const pa = a.split(".").map(n => parseInt(n, 10));
+  const pb = b.split(".").map(n => parseInt(n, 10));
+  for (let i = 0; i < 3; i++) {
+    const x = pa[i] ?? 0, y = pb[i] ?? 0;
+    if (x < y) return true;
+    if (x > y) return false;
+  }
+  return false;
+}
+
+function UpgradeBanner() {
+  const { lang } = useLang();
+  const auth = useAuth();
+  const [currentVersion, setCurrentVersion] = useState<string | null>(null);
+  const [latestVersion, setLatestVersion] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
+
+  useEffect(() => {
+    if (!auth.token) return;
+    let cancelled = false;
+    Promise.all([
+      apiFetch<{ last_daemon_version: string | null }>("/identity/whoami").catch(() => ({ last_daemon_version: null })),
+      apiFetch<{ version: string | null }>("/daemon/latest-version").catch(() => ({ version: null })),
+    ]).then(([me, latest]) => {
+      if (cancelled) return;
+      setCurrentVersion(me.last_daemon_version ?? null);
+      setLatestVersion(latest.version ?? null);
+    });
+    return () => { cancelled = true; };
+  }, [auth.token]);
+
+  const showBanner =
+    !dismissed &&
+    currentVersion != null &&
+    latestVersion != null &&
+    semverLT(currentVersion, latestVersion);
+
+  if (!showBanner) return null;
+
+  const installerCmd = ` npx -y @susurration/installer install --token ${auth.token ?? "sk_live_YOUR_TOKEN"}`;
+  const handleClick = () => {
+    navigator.clipboard.writeText(installerCmd).then(
+      () => { setCopied(true); setTimeout(() => setCopied(false), 3000); },
+      () => { /* clipboard denied; fallback: select text manually */ },
+    );
+    // Phase 16 telemetry — track upgrade-prompt engagement
+    fetch(`${API}/onboarding/event`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${auth.token}` },
+      body: JSON.stringify({
+        action: "upgrade_banner_click",
+        context: { current: currentVersion, latest: latestVersion },
+      }),
+      keepalive: true,
+    }).catch(() => {});
+  };
+
+  return (
+    <div style={{
+      position: "fixed",
+      top: 12,
+      left: "50%",
+      transform: "translateX(-50%)",
+      zIndex: 100,
+      display: "flex",
+      alignItems: "center",
+      gap: 12,
+      padding: "8px 14px 8px 16px",
+      background: "var(--surface3)",
+      border: "0.5px solid var(--accent-border)",
+      borderRadius: "var(--radius-pill, 999px)",
+      boxShadow: "0 4px 16px rgba(0, 0, 0, 0.35)",
+      fontSize: 12,
+      fontFamily: "var(--mono)",
+      color: "var(--ink)",
+      maxWidth: "calc(100vw - 24px)",
+    }}>
+      <span style={{
+        display: "inline-block", width: 6, height: 6, borderRadius: "50%",
+        background: "var(--accent, #7aa2f7)",
+        animation: "daemon-pulse 1.6s ease-in-out infinite",
+      }} />
+      <span style={{ color: "var(--ink-soft)" }}>
+        {lang === "zh"
+          ? <>Daemon 新版可用 <span style={{ color: "var(--ink-faint)" }}>v{currentVersion}</span> → <span style={{ color: "var(--accent, #7aa2f7)" }}>v{latestVersion}</span></>
+          : <>Daemon update <span style={{ color: "var(--ink-faint)" }}>v{currentVersion}</span> → <span style={{ color: "var(--accent, #7aa2f7)" }}>v{latestVersion}</span></>
+        }
+      </span>
+      <button
+        onClick={handleClick}
+        style={{
+          background: copied ? "var(--green)" : "var(--accent, #7aa2f7)",
+          color: copied ? "#0b0f1a" : "#0b0f1a",
+          border: "none",
+          padding: "4px 12px",
+          borderRadius: "var(--radius-sm, 4px)",
+          fontFamily: "var(--mono)",
+          fontSize: 11,
+          fontWeight: 500,
+          cursor: "pointer",
+          letterSpacing: "0.3px",
+          transition: "background 120ms ease",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {copied
+          ? (lang === "zh" ? "✓ 已复制" : "✓ Copied")
+          : (lang === "zh" ? "复制升级命令" : "Copy upgrade cmd")
+        }
+      </button>
+      <button
+        onClick={() => setDismissed(true)}
+        title={lang === "zh" ? "本次会话不再提示" : "Dismiss for this session"}
+        style={{
+          background: "transparent",
+          border: "none",
+          color: "var(--ink-faint)",
+          cursor: "pointer",
+          fontSize: 14,
+          padding: "0 4px",
+          lineHeight: 1,
+        }}
+      >
+        ✕
+      </button>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════
 //   SIDEBAR
 // ════════════════════════════════════════════════════════
 // v4 — Daemon alive indicator (5 states based on last_daemon_ping_at + last_mcp_ping_at)
@@ -2671,6 +2813,7 @@ export function DashboardPage() {
         <ActivityBadgeContext.Provider value={{ setHasNew: setHasNewActivity }}>
         <div className="dash-shell">
           {showOnboarding && <Onboarding onComplete={() => setShowOnboarding(false)} />}
+          {!showOnboarding && <UpgradeBanner />}
           <Sidebar page={page} setPage={setPagePersist} hasNewActivity={hasNewActivity} />
           <div className="dash-content">
             {visited.has("dashboard") && <div style={{ display: page === "dashboard" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0 }}><DashHome /></div>}
