@@ -114,18 +114,28 @@ export function reportClientError(
 
 /** Report daemon decision telemetry. Fire-and-forget — never throws.
  *  Used to distinguish "silent daemon" (running but all noop) vs "dead daemon"
- *  (not connected). Backend endpoint accepts every decision including noop. */
+ *  (not connected). Backend endpoint accepts every decision including noop.
+ *
+ *  Phase 11b — also dual-writes to /daemon_decisions (caller-bound, plaintext
+ *  for cross-device dashboard query). The legacy /daemon/decision endpoint
+ *  stays (analytics/funnel hash). reasoning_summary cap at 500 chars. */
 export function reportDaemonDecision(
   cfg: SusuClientConfig,
   params: {
     kind: "react" | "noop" | "push" | "error";
     signal_id?: string;
+    channel_id?: string;
+    reaction_id?: string;
     event_kind?: string;
     error_type?: string;
     latency_ms?: number;
+    llm_provider?: string;
+    llm_model?: string;
+    reasoning_summary?: string;
     context?: Record<string, unknown>;
   },
 ): void {
+  // Hashed analytics path (legacy)
   void authedFetch(cfg, `/daemon/decision`, {
     method: "POST",
     body: JSON.stringify({
@@ -137,6 +147,77 @@ export function reportDaemonDecision(
       context: { version: DAEMON_VERSION, ...(params.context ? redactSecretsDeep(params.context as Record<string, unknown>) : {}) },
     }),
   }).catch(() => {});
+  // Phase 11b — caller-bound plaintext for cross-device user-visible decision history
+  void authedFetch(cfg, `/daemon_decisions`, {
+    method: "POST",
+    body: JSON.stringify({
+      kind: params.kind,
+      ...(params.signal_id ? { signal_id: params.signal_id } : {}),
+      ...(params.channel_id ? { channel_id: params.channel_id } : {}),
+      ...(params.reaction_id ? { reaction_id: params.reaction_id } : {}),
+      ...(params.event_kind ? { event_kind: params.event_kind } : {}),
+      ...(params.error_type ? { error_type: params.error_type } : {}),
+      ...(params.latency_ms != null ? { latency_ms: params.latency_ms } : {}),
+      ...(params.llm_provider ? { llm_provider: params.llm_provider } : {}),
+      ...(params.llm_model ? { llm_model: params.llm_model } : {}),
+      ...(params.reasoning_summary ? { reasoning_summary: redactSecrets(params.reasoning_summary).slice(0, 500) } : {}),
+    }),
+  }).catch(() => {});
+}
+
+/** Phase 11a — Sync paper position open to server (cross-device). Fire-and-forget. */
+export function syncPaperOpen(
+  cfg: SusuClientConfig,
+  params: {
+    signal_id: string;
+    channel_id: string;
+    token: string;
+    direction: "long" | "short";
+    leverage: number;
+    entry_price: number;
+    stop_loss: number;
+    take_profit: number;
+    position_usd: number;
+    size_factor?: number;
+    peer_username?: string;
+    is_replay?: boolean;
+    opened_at?: string;
+    daemon_local_id?: string;
+  },
+): void {
+  void authedFetch(cfg, `/paper_positions/open`, {
+    method: "POST",
+    body: JSON.stringify(params),
+  }).catch(() => {});
+}
+
+/** Phase 11a — Sync paper position close to server. Fire-and-forget. */
+export function syncPaperClose(
+  cfg: SusuClientConfig,
+  params: {
+    signal_id: string;
+    exit_reason: string;
+    exit_price: number;
+    exit_pnl_pct: number;
+    exit_pnl_usd?: number;
+    closed_at?: string;
+  },
+): void {
+  void authedFetch(cfg, `/paper_positions/close`, {
+    method: "POST",
+    body: JSON.stringify(params),
+  }).catch(() => {});
+}
+
+/** Phase 11a — Backfill: fetch open positions from server (after daemon
+ *  reinstall / new device) so local paper_trades.json can be reconstituted. */
+export async function fetchPaperPositionsMine(
+  cfg: SusuClientConfig,
+  status: "open" | "closed" | "all" = "open",
+): Promise<{ positions: any[] }> {
+  const resp = await authedFetch(cfg, `/paper_positions/mine?status=${status}`);
+  if (!resp.ok) return { positions: [] };
+  return await resp.json() as any;
 }
 
 /** Cross-channel poll: returns events newer than `since` across every

@@ -25,6 +25,7 @@ import {
 import { parseJsonBody, invalidJson } from "../lib/http.ts";
 import { check as rateCheck, RateLimitedError } from "../lib/rate_limit.ts";
 import { recordEvent } from "../lib/events.ts";
+import { insertChannelEvent } from "../lib/channel_events.ts";
 import {
   ejectAddressFromChannel,
   publishChannel,
@@ -104,6 +105,18 @@ channelRoutes.post("/channels", async (c) => {
       return id;
     });
     recordEvent({ type: "channel_create", address: me, channelId, payload: { is_group: true, has_name: !!name } });
+    // Phase 10 D7: persist channel_created so /signals/feed REST query can render
+    // "X created group Y" history (not just SSE live push).
+    {
+      const meRow = await sql<{ username: string | null }[]>`SELECT username FROM identities WHERE address = ${me}`;
+      insertChannelEvent({
+        channelId,
+        kind: "channel_created",
+        actorAddress: me,
+        actorUsername: meRow[0]?.username ?? null,
+        payload: { name: name ?? null, is_group: true },
+      });
+    }
     // BETA-1.c: surface the new channel to creator's live feed-stream so they
     // see it without reconnect, and broadcast a `channel_created` user-scope
     // event so the inbox UI can highlight it.
@@ -233,6 +246,15 @@ channelRoutes.post("/channels/:id/invite", async (c) => {
     throw e;
   }
   recordEvent({ type: "channel_invite", address: me, channelId });
+  // Phase 10 D7: persist channel_member_added.
+  insertChannelEvent({
+    channelId,
+    kind: "channel_member_added",
+    actorAddress: me,
+    actorUsername: inviterUsername,
+    targetAddress: target,
+    targetUsername: targetUsername,
+  });
   // BETA-1.c: broadcast member-add to existing channel members so anyone
   // watching sees "@bob just joined", and notify the invitee's user-scope
   // feed-stream so their inbox lights up. Also wire dynamic subscribe so
@@ -330,6 +352,16 @@ channelRoutes.post("/channels/:id/leave", async (c) => {
       reason: "left",
       created_at: createdAt,
     });
+    // Phase 10 D7: persist self-leave.
+    insertChannelEvent({
+      channelId,
+      kind: "channel_member_removed",
+      actorAddress: me,
+      actorUsername: u[0]?.username ?? null,
+      targetAddress: me,
+      targetUsername: u[0]?.username ?? null,
+      payload: { reason: "left" },
+    });
     if (result.ownerHandover) {
       publishChannel(channelId, {
         kind: "channel_owner_transferred",
@@ -338,6 +370,17 @@ channelRoutes.post("/channels/:id/leave", async (c) => {
         to_address: result.ownerHandover,
         reason: "auto_elected_on_leave",
         created_at: createdAt,
+      });
+      // Phase 10 D7: persist auto-owner-handover.
+      const newOwnerRow = await sql<{ username: string | null }[]>`SELECT username FROM identities WHERE address = ${result.ownerHandover}`;
+      insertChannelEvent({
+        channelId,
+        kind: "channel_owner_transferred",
+        actorAddress: me,
+        actorUsername: u[0]?.username ?? null,
+        targetAddress: result.ownerHandover,
+        targetUsername: newOwnerRow[0]?.username ?? null,
+        payload: { reason: "auto_elected_on_leave" },
       });
     }
   }
@@ -403,6 +446,19 @@ channelRoutes.post("/channels/:id/kick", async (c) => {
     reason: "kicked",
     created_at: new Date().toISOString(),
   });
+  // Phase 10 D7: persist kick.
+  {
+    const meRow = await sql<{ username: string | null }[]>`SELECT username FROM identities WHERE address = ${me}`;
+    insertChannelEvent({
+      channelId,
+      kind: "channel_member_removed",
+      actorAddress: me,
+      actorUsername: meRow[0]?.username ?? null,
+      targetAddress: target,
+      targetUsername: tu[0]?.username ?? null,
+      payload: { reason: "kicked" },
+    });
+  }
   // Close any active SSE subscription that the kicked user has on THIS
   // channel. Without this, their open `susu watch` / `susu feed -f` keeps
   // streaming new messages — real data leak (G v0.0.4 review #2).
@@ -455,6 +511,23 @@ channelRoutes.post("/channels/:id/transfer-owner", async (c) => {
     reason: "transfer",
     created_at: new Date().toISOString(),
   });
+  // Phase 10 D7: persist explicit owner transfer.
+  {
+    const rows = await sql<{ address: string; username: string | null }[]>`
+      SELECT address, username FROM identities WHERE address IN (${me}, ${candidate})
+    `;
+    const meName = rows.find(r => r.address === me)?.username ?? null;
+    const candName = rows.find(r => r.address === candidate)?.username ?? null;
+    insertChannelEvent({
+      channelId,
+      kind: "channel_owner_transferred",
+      actorAddress: me,
+      actorUsername: meName,
+      targetAddress: candidate,
+      targetUsername: candName,
+      payload: { reason: "transfer" },
+    });
+  }
   return c.json({ ok: true, channel_id: channelId, new_owner: candidate });
 });
 
@@ -499,6 +572,17 @@ channelRoutes.post("/channels/:id/rename", async (c) => {
     by: me,
     created_at: new Date().toISOString(),
   });
+  // Phase 10 D7: persist rename.
+  {
+    const meRow = await sql<{ username: string | null }[]>`SELECT username FROM identities WHERE address = ${me}`;
+    insertChannelEvent({
+      channelId,
+      kind: "channel_renamed",
+      actorAddress: me,
+      actorUsername: meRow[0]?.username ?? null,
+      payload: { old_name: oldName, new_name: newName },
+    });
+  }
   return c.json({ ok: true, channel_id: channelId, name: newName });
 });
 
@@ -557,6 +641,18 @@ channelRoutes.put("/channels/:id/meta", async (c) => {
     size_bytes: serialized.length,
     created_at: new Date().toISOString(),
   });
+  // Phase 10 D7 (G #2 fix) — persist meta change so feed renderer's
+  // channel_meta_changed branch isn't dead code.
+  {
+    const meRow = await sql<{ username: string | null }[]>`SELECT username FROM identities WHERE address = ${me}`;
+    insertChannelEvent({
+      channelId,
+      kind: "channel_meta_changed",
+      actorAddress: me,
+      actorUsername: meRow[0]?.username ?? null,
+      payload: { method: "PUT", size_bytes: serialized.length },
+    });
+  }
   return c.json({ ok: true });
 });
 
@@ -605,5 +701,16 @@ channelRoutes.patch("/channels/:id/meta", async (c) => {
     method: "PATCH",
     created_at: new Date().toISOString(),
   });
+  // Phase 10 D7 (G #2 fix) — persist meta change.
+  {
+    const meRow = await sql<{ username: string | null }[]>`SELECT username FROM identities WHERE address = ${me}`;
+    insertChannelEvent({
+      channelId,
+      kind: "channel_meta_changed",
+      actorAddress: me,
+      actorUsername: meRow[0]?.username ?? null,
+      payload: { method: "PATCH" },
+    });
+  }
   return c.json({ ok: true });
 });

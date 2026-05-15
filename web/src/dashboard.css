@@ -712,10 +712,9 @@
 /* Signal card — bracket-wrapped token chip */
 .sig-cell-val.sig-token { color: var(--ink); letter-spacing: 0.5px; }
 
-/* Bottom status bar — trade.xyz inspired, fixed, global */
+/* Bottom status bar — sits inside dash-content (not over sidebar) */
 .status-bar {
-  position: fixed;
-  bottom: 0; left: 0; right: 0;
+  flex-shrink: 0;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -727,14 +726,12 @@
   color: var(--ink-faint);
   font-family: var(--mono);
   letter-spacing: 0.5px;
-  z-index: 50;
   min-height: 30px;
 }
 .status-bar-left { display: flex; align-items: center; gap: 12px; }
 .status-bar-right { display: flex; align-items: center; gap: 14px; }
 .status-item { display: inline-flex; align-items: center; gap: 4px; }
 .status-mono { color: var(--ink-soft); font-variant-numeric: tabular-nums; }
-.dash-content { padding-bottom: 30px; box-sizing: border-box; }
 
 /* Empty state */
 .empty-state {

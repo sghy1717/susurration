@@ -11,6 +11,7 @@
 // Writes to ~/.susu/paper_trades.json.
 
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync } from "node:fs";
+import { syncPaperOpen, syncPaperClose, fetchPaperPositionsMine, type SusuClientConfig } from "./susu_actions.ts";
 import { dirname } from "node:path";
 
 // ── Default strategy constants ──────────────────────────────────────────
@@ -87,8 +88,66 @@ export class PaperTrader {
     private minSizeFactor: number = 0.5,
     private maxOpen: number = Infinity,
     private eventLogPath?: string,
+    /** Phase 11a — when set, paper opens/closes mirror to server (cross-device).
+     *  When null, daemon stays local-only (offline / opt-out). */
+    private susuClient?: SusuClientConfig | null,
   ) {
     mkdirSync(dirname(tradesPath), { recursive: true });
+  }
+
+  /** Phase 11a — On startup, pull server-side open positions and merge into
+   *  local book. Useful after daemon reinstall / new device — server is
+   *  cross-device source of truth for visibility. Local PaperTrade.id stays
+   *  as daemon's sequential counter; signal_id is the dedup key.
+   *
+   *  Fire-and-forget: failures don't block daemon startup. */
+  async syncFromServerOnce(): Promise<void> {
+    if (!this.susuClient) return;
+    try {
+      const remote = await fetchPaperPositionsMine(this.susuClient, "open");
+      if (!remote.positions || remote.positions.length === 0) return;
+      const book = this.loadBook();
+      const localSignalIds = new Set(book.trades.map((t) => t.signal_id));
+      let added = 0;
+      for (const r of remote.positions) {
+        if (!r.signal_id || localSignalIds.has(r.signal_id)) continue;
+        // Reconstruct local PaperTrade from server row.
+        const id = String(book.trades.length + 1 + added).padStart(3, "0");
+        book.trades.push({
+          id,
+          token: r.token,
+          direction: r.direction,
+          leverage: r.leverage,
+          position_pct: 0,  // not persisted server-side; safe default
+          position_usd: r.position_usd,
+          notional_usd: r.position_usd * r.leverage,
+          entry_price: r.entry_price,
+          stop_loss: r.stop_loss,
+          take_profit: r.take_profit,
+          time_stop_hours: DEFAULT_TIME_STOP_HOURS,
+          trailing_activate_pct: DEFAULT_TRAILING_ACTIVATE,
+          trailing_giveback_pct: DEFAULT_TRAILING_GIVEBACK,
+          best_pnl_pct: 0,
+          size_factor: r.size_factor ?? 0.7,
+          peer: r.peer_username ? `@${r.peer_username}` : "@?",
+          signal_id: r.signal_id,
+          opened_at: r.opened_at ?? new Date().toISOString(),
+          exit_price: null,
+          exit_time: null,
+          exit_reason: null,
+          pnl_pct: null,
+          pnl_usd: null,
+          status: "open",
+        });
+        added++;
+      }
+      if (added > 0) {
+        this.saveBook(book);
+        process.stderr.write(`[paper] synced ${added} open position(s) from server\n`);
+      }
+    } catch (err) {
+      process.stderr.write(`[paper] server sync failed (non-fatal): ${(err as Error)?.message ?? err}\n`);
+    }
   }
 
   private emitEvent(evt: Record<string, unknown>): void {
@@ -242,6 +301,25 @@ export class PaperTrader {
       peer: trade.peer,
       balance,
     });
+    // Phase 11a — mirror to server for cross-device visibility.
+    if (this.susuClient && trade.signal_id) {
+      const channelId = (trigger as any)?.channel_id ?? "";
+      const isReplay = !!(sigPayload as any)?.replay;
+      syncPaperOpen(this.susuClient, {
+        signal_id: trade.signal_id,
+        channel_id: channelId,
+        token, direction, leverage,
+        entry_price: entryPrice,
+        stop_loss: trade.stop_loss,
+        take_profit: trade.take_profit,
+        position_usd: trade.position_usd,
+        size_factor: sf,
+        peer_username: peer.replace(/^@/, ""),
+        is_replay: isReplay,
+        opened_at: trade.opened_at,
+        daemon_local_id: trade.id,
+      });
+    }
   }
 
   /** One-shot position check. Use in --once poll mode after processing events. */
@@ -319,6 +397,17 @@ export class PaperTrader {
           best_pnl_pct: t.best_pnl_pct,
           peer: t.peer,
         });
+        // Phase 11a — mirror close to server.
+        if (this.susuClient && t.signal_id) {
+          syncPaperClose(this.susuClient, {
+            signal_id: t.signal_id,
+            exit_reason: reason,
+            exit_price: price,
+            exit_pnl_pct: t.pnl_pct,
+            exit_pnl_usd: pnlUsd,
+            closed_at: t.exit_time ?? new Date().toISOString(),
+          });
+        }
       }
     }
 

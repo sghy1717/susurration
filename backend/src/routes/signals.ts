@@ -691,6 +691,7 @@ signalRoutes.get("/signals/feed", async (c) => {
              s.payload,
              s.created_at,
              c.name AS channel_name,
+             c.is_group AS is_group,
              NULL::uuid AS parent_signal_id,
              false AS is_auto,
              (
@@ -719,6 +720,7 @@ signalRoutes.get("/signals/feed", async (c) => {
              r.payload,
              r.created_at,
              c.name AS channel_name,
+             c.is_group AS is_group,
              r.signal_id AS parent_signal_id,
              r.is_auto,
              (
@@ -736,6 +738,43 @@ signalRoutes.get("/signals/feed", async (c) => {
       JOIN channel_members cm ON cm.channel_id = sig.channel_id AND cm.address = ${me}
       JOIN channels c ON c.channel_id = sig.channel_id
       LEFT JOIN identities i ON i.address = r.from_address
+
+      UNION ALL
+
+      -- Phase 10 D7 channel structural events (created / member_added /
+      -- member_removed / renamed / owner_transferred). Persisted in channel_events
+      -- (migration 016) so refresh recovers history. Each row kind = specific
+      -- event type so frontend can render with a per-kind template.
+      SELECT ce.kind::text AS kind,
+             NULL::uuid AS signal_id,
+             NULL::uuid AS reaction_id,
+             ce.channel_id,
+             ce.actor_address AS from_address,
+             ce.actor_username AS from_username,
+             (jsonb_build_object(
+               'actor_address', ce.actor_address,
+               'actor_username', ce.actor_username,
+               'target_address', ce.target_address,
+               'target_username', ce.target_username
+             ) || COALESCE(ce.payload, '{}'::jsonb)) AS payload,
+             ce.created_at,
+             c.name AS channel_name,
+             c.is_group AS is_group,
+             NULL::uuid AS parent_signal_id,
+             false AS is_auto,
+             (
+               SELECT json_build_object(
+                 'address', cm2.address,
+                 'username', i2.username
+               )
+               FROM channel_members cm2
+               LEFT JOIN identities i2 ON i2.address = cm2.address
+               WHERE cm2.channel_id = ce.channel_id AND cm2.address <> ${me}
+               LIMIT 1
+             ) AS peer
+      FROM channel_events ce
+      JOIN channel_members cm ON cm.channel_id = ce.channel_id AND cm.address = ${me}
+      JOIN channels c ON c.channel_id = ce.channel_id
     ) unified
     ${sinceClause}
     ORDER BY created_at DESC LIMIT ${limit}

@@ -173,6 +173,9 @@ interface FeedItem {
   payload: any;
   created_at: string;
   channel_name: string | null;
+  /** Phase 10 G #5 fix — explicit is_group from channels.is_group instead of
+   *  the heuristic !!channel_name (which couples to "groups always have a name"). */
+  is_group?: boolean;
   peer?: { address: string; username: string | null };
   is_auto?: boolean;
 }
@@ -421,15 +424,17 @@ function AwaitingSignalCard() {
 }
 
 // ── Signal card (shared between dashboard + feed) ──
-function SignalCard({ handle, avatar, avatarColor, time, channel, symbol, direction, leverage, entry, sltp, reason, agrees, against, skips, compact, expired }: {
+function SignalCard({ handle, avatar, avatarColor, time, channel, isGroup, symbol, direction, leverage, entry, sltp, reason, agrees, against, skips, compact, expired }: {
   handle: string; avatar: string; avatarColor?: string; time: string; channel: string;
+  /** Phase 10 D8: true = group channel (renders ⌘ icon + accent color); false/undefined = 1-on-1 */
+  isGroup?: boolean;
   symbol: string; direction: "long" | "short"; leverage: string; entry: string; sltp: string;
   reason: string; agrees: number; against: number; skips?: number; compact?: boolean; expired?: boolean;
 }) {
   const { t } = useLang();
   const dirLabel = direction === "long" ? "LONG" : "SHORT";
   return (
-    <div className={`signal-card${expired ? " signal-expired" : ""}`}>
+    <div className={`signal-card${expired ? " signal-expired" : ""}${isGroup ? " signal-card-group" : ""}`}>
       <div className="signal-card-head">
         <div className="signal-avatar" style={avatarColor ? { color: avatarColor } : undefined}>{avatar}</div>
         <div className="signal-meta">
@@ -437,7 +442,10 @@ function SignalCard({ handle, avatar, avatarColor, time, channel, symbol, direct
           <div className="ts">{time}</div>
         </div>
         {expired && <div className="signal-missed-badge">{t("sig.missed")}</div>}
-        <div className="signal-channel-badge">{channel}</div>
+        <div className={`signal-channel-badge${isGroup ? " channel-badge-group" : ""}`}>
+          {isGroup && <span style={{ marginRight: 4, opacity: 0.85 }}>⌘</span>}
+          {channel}
+        </div>
       </div>
       <div className="signal-grid">
         <div className="sig-cell"><div className="sig-cell-label">{compact ? t("sig.symbol") : t("sig.symbol")}</div><div className="sig-cell-val sig-token">[{symbol}]</div></div>
@@ -492,6 +500,11 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
   const testStartRef = useRef<number>(0);
   const testPollRef = useRef<number>(0);
   const testTickRef = useRef<number>(0);
+  // v4 Phase 9 二步确认：用户必须显式 ack「installer 跑完了 + IDE 重启了」才能
+  // 点测试。Phase 7 ship 后 N=1 真用户 ef3c1f14 在 28s 内就点了测试 → 90s
+  // timeout fail，因为根本没装 daemon。这个 checkbox 拦截这种"看到按钮直接点"
+  // 的反模式。
+  const [readyAcked, setReadyAcked] = useState(false);
 
 
   const goStep = (n: number) => {
@@ -856,13 +869,51 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
             </div>
 
             {testStage === "idle" && (
-              <button
-                className="ob-btn-next"
-                onClick={triggerConnectivityTest}
-                style={{ width: "100%" }}
-              >
-                {lang === "zh" ? "开始连通测试" : "Start connectivity test"}
-              </button>
+              <div style={{
+                fontSize: 11, lineHeight: 1.7, padding: "8px 10px",
+                background: "rgba(245, 158, 11, 0.08)",
+                border: "1px solid rgba(245, 158, 11, 0.3)",
+                borderRadius: 4, color: "var(--yellow, #f59e0b)",
+                marginBottom: 12,
+              }}>
+                {lang === "zh"
+                  ? <>⚠ <strong>必须先到终端跑完上面的命令</strong>，installer 提示完成后<strong>完全退出 IDE（Cmd+Q）并重开</strong>，daemon 才能启动。如果跳过这两步直接点测试，必然超时失败。</>
+                  : <>⚠ <strong>You MUST run the command above in your terminal first</strong>, then <strong>fully quit your IDE (Cmd+Q) and reopen</strong> after installer says done. Skipping these two steps and clicking test will time out.</>
+                }
+              </div>
+            )}
+
+            {testStage === "idle" && (
+              <>
+                <label style={{
+                  display: "flex", alignItems: "flex-start", gap: 8,
+                  fontSize: 11, color: "var(--ink-soft)", lineHeight: 1.7,
+                  cursor: "pointer", padding: "6px 0", marginBottom: 12,
+                  userSelect: "none",
+                }}>
+                  <input
+                    type="checkbox"
+                    checked={readyAcked}
+                    onChange={(e) => setReadyAcked(e.target.checked)}
+                    style={{ marginTop: 3, flexShrink: 0, cursor: "pointer" }}
+                  />
+                  <span>
+                    {lang === "zh"
+                      ? "我已经跑完 installer 命令，且完全退出并重开了 IDE"
+                      : "I've run the installer command AND fully quit + reopened my IDE"
+                    }
+                  </span>
+                </label>
+                <button
+                  className="ob-btn-next"
+                  onClick={triggerConnectivityTest}
+                  disabled={!readyAcked}
+                  title={!readyAcked ? (lang === "zh" ? "请先勾选确认" : "Please confirm above first") : undefined}
+                  style={{ width: "100%", opacity: readyAcked ? 1 : 0.5, cursor: readyAcked ? "pointer" : "not-allowed" }}
+                >
+                  {lang === "zh" ? "开始连通测试" : "Start connectivity test"}
+                </button>
+              </>
             )}
 
             {testStage === "pushing" && (
@@ -924,7 +975,7 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
                 )}
                 <button
                   className="ob-btn-back"
-                  onClick={triggerConnectivityTest}
+                  onClick={() => { setTestStage("idle"); setReadyAcked(false); setTestFailReason(null); }}
                   style={{ fontSize: 11, padding: "6px 14px" }}
                 >
                   {lang === "zh" ? "重试" : "Retry"}
@@ -1194,6 +1245,12 @@ function DashHome() {
       });
   }, [friendsReady, friends]);
 
+  // Phase 11a — server-side paper positions (cross-device source of truth).
+  // When daemon (>= v0.0.X with sync) has been pushing, this returns full
+  // open + closed history. When empty (old daemon / no daemon yet), falls
+  // back to feed-derived positions below.
+  const [serverPositions, setServerPositions] = useState<any[]>([]);
+
   const fetchData = useCallback(() => {
     apiFetch<{ friends: Friend[] }>("/friends").then(r => { setFriends(r.friends); setFriendsReady(true); }).catch(() => { setFriendsReady(true); });
     apiFetch<{ events: FeedItem[] }>("/signals/feed?limit=200").then(r => {
@@ -1210,6 +1267,10 @@ function DashHome() {
         for (const c of r.closes) m.set(c.signal_id, { exit_reason: c.exit_reason, exit_price: c.exit_price, exit_pnl_pct: c.exit_pnl_pct });
         setPersistedCloses(m);
       }).catch(e => console.warn("[positions/closed] fetch failed:", e.message));
+    // Phase 11a — pull server-side paper positions (auth-bound to caller).
+    apiFetch<{ positions: any[] }>("/paper_positions/mine?status=all")
+      .then(r => setServerPositions(r.positions ?? []))
+      .catch(e => console.warn("[paper_positions/mine] fetch failed:", e.message));
   }, []);
 
   useEffect(() => {
@@ -1219,18 +1280,45 @@ function DashHome() {
   }, [fetchData]);
 
   const refreshPositions = useCallback(() => {
-    if (!auth.address || feed.length === 0) return;
-    const raw = buildPositions(feed, auth.address);
+    if (!auth.address) return;
+    // Phase 11a — server-side positions take precedence (cross-device truth).
+    // Fallback to feed-derived for old daemons that haven't synced yet.
+    let raw: Position[] = [];
+    if (serverPositions.length > 0) {
+      raw = serverPositions.map((p): Position => ({
+        token: p.token,
+        direction: p.direction === "short" ? "short" : "long",
+        leverage: p.leverage ?? 3,
+        entryPrice: p.entry_price,
+        stopLoss: p.stop_loss,
+        takeProfit: p.take_profit,
+        peer: p.peer_username ? `@${p.peer_username}` : "—",
+        signalId: p.signal_id,
+        openedAt: p.opened_at,
+        status: p.closed_at ? "closed" : "open",
+        positionUsd: p.position_usd,
+        isReplay: !!p.is_replay,
+        ...(p.closed_at ? {
+          exitPrice: p.exit_price,
+          exitReason: p.exit_reason,
+          pnlPct: p.exit_pnl_pct,
+          pnlUsd: p.exit_pnl_usd,
+        } : {}),
+      }));
+    } else if (feed.length > 0) {
+      raw = buildPositions(feed, auth.address);
+    }
     if (raw.length === 0) { setPositions([]); setPricesLoaded(true); return; }
-    const symbols = [...new Set(raw.map(p => p.token))].join(",");
-    apiFetch<{ prices: Record<string, number> }>(`/prices?symbols=${symbols}`)
+    const openSymbols = [...new Set(raw.filter(p => p.status === "open").map(p => p.token))].join(",");
+    if (!openSymbols) { setPositions(raw); setPricesLoaded(true); return; }
+    apiFetch<{ prices: Record<string, number> }>(`/prices?symbols=${openSymbols}`)
       .then(r => {
         const { positions: updated } = applyPrices(raw, r.prices, persistedCloses);
         setPositions(updated);
         setPricesLoaded(true);
       })
       .catch(() => { setPositions(raw); setPricesLoaded(true); });
-  }, [feed, auth.address, persistedCloses]);
+  }, [feed, serverPositions, auth.address, persistedCloses]);
 
   useEffect(() => {
     refreshPositions();
@@ -1462,11 +1550,18 @@ function FeedPage() {
     }
   }
 
+  // Phase 10 D7 — channel structural events come through feed REST query as
+  // these distinct kinds. Filter logic + render branch handles them.
+  const CHANNEL_EVENT_KINDS = new Set([
+    "channel_created", "channel_member_added", "channel_member_removed",
+    "channel_renamed", "channel_owner_transferred", "channel_meta_changed",
+  ]);
   const filtered = feed.filter(f => {
     if (activeType === "reactions") return f.kind === "reaction";
+    if (activeType === "events") return CHANNEL_EVENT_KINDS.has(f.kind);
     if (f.kind === "reaction" && f.parent_signal_id) return false;
     if (activeType === "signals") return f.kind === "signal";
-    return true;
+    return true;  // "all"
   });
 
   return (
@@ -1475,7 +1570,7 @@ function FeedPage() {
         <div className="d-page-title">susurration / <strong>{t("feed.title")}</strong></div>
         <div className="header-actions">
           <div className="filter-chips">
-            {["all", "signals", "reactions"].map((f) => (
+            {["all", "signals", "reactions", "events"].map((f) => (
               <button key={f} className={`filter-chip ${activeType === f ? "active" : ""}`} onClick={() => setActiveType(f)}>
                 {t(`feed.${f}`)}
               </button>
@@ -1523,6 +1618,7 @@ function FeedPage() {
                   <SignalCard
                     handle={handle} avatar={avatar} time={formatTime(item.created_at)}
                     channel={channelLabel}
+                    isGroup={!!item.is_group}
                     symbol={p.symbol ?? p.token ?? "—"} direction={p.direction === "short" ? "short" : "long"}
                     leverage={p.metadata?.leverage ?? p.leverage ?? "—"}
                     entry={p.metadata?.entry_price ?? p.entry_price ?? p.entry ?? "—"}
@@ -1620,6 +1716,69 @@ function FeedPage() {
                 </div>
               );
             }
+            // Phase 10 D7 + D10 — channel structural event narrative row.
+            if (CHANNEL_EVENT_KINDS.has(item.kind)) {
+              const ap = item.payload as any;
+              const actorName = ap?.actor_username ?? item.from_username ?? "?";
+              const targetName = ap?.target_username ?? "?";
+              const channelName = item.channel_name ?? item.channel_id?.slice(0, 8) ?? "?";
+              const reason = ap?.reason as string | undefined;
+              const oldName = ap?.old_name as string | undefined;
+              const newName = ap?.new_name as string | undefined;
+              let text = "";
+              let icon = "·";
+              let tone: "info" | "warn" | "destructive" = "info";
+              switch (item.kind) {
+                case "channel_created":
+                  icon = "+"; text = lang === "zh"
+                    ? `@${actorName} 创建了群组 ${channelName}`
+                    : `@${actorName} created group ${channelName}`; break;
+                case "channel_member_added":
+                  icon = "→"; text = lang === "zh"
+                    ? `@${actorName} 邀请 @${targetName} 加入 ${channelName}`
+                    : `@${actorName} invited @${targetName} to ${channelName}`; break;
+                case "channel_member_removed":
+                  if (reason === "kicked") {
+                    icon = "✗"; tone = "destructive"; text = lang === "zh"
+                      ? `@${actorName} 把 @${targetName} 踢出 ${channelName}`
+                      : `@${actorName} kicked @${targetName} from ${channelName}`;
+                  } else {
+                    icon = "←"; text = lang === "zh"
+                      ? `@${targetName} 离开了 ${channelName}`
+                      : `@${targetName} left ${channelName}`;
+                  } break;
+                case "channel_owner_transferred":
+                  icon = "⇌"; text = lang === "zh"
+                    ? `${channelName} 群主从 @${actorName} 转给 @${targetName}`
+                    : `${channelName} ownership: @${actorName} → @${targetName}`; break;
+                case "channel_renamed":
+                  icon = "✎"; text = lang === "zh"
+                    ? `@${actorName} 把群 "${oldName}" 改名为 "${newName}"`
+                    : `@${actorName} renamed "${oldName}" to "${newName}"`; break;
+                case "channel_meta_changed":
+                  icon = "⚙"; text = lang === "zh"
+                    ? `@${actorName} 更新了 ${channelName} 的 meta`
+                    : `@${actorName} updated ${channelName} meta`; break;
+                default:
+                  text = `${item.kind}: ${JSON.stringify(ap).slice(0, 80)}`;
+              }
+              const toneColor = tone === "destructive" ? "var(--red, #ef4444)" : "var(--ink-faint)";
+              return (
+                <div key={item.created_at + item.kind + (ap?.target_address ?? "")} style={{
+                  display: "flex", alignItems: "center", gap: 10,
+                  padding: "8px 14px", fontSize: 11,
+                  color: toneColor, lineHeight: 1.6,
+                  borderLeft: `2px solid ${tone === "destructive" ? "var(--red, #ef4444)" : "var(--border-base, #2a2a2a)"}`,
+                  background: "rgba(255,255,255,0.015)",
+                  marginBottom: 4, borderRadius: 3,
+                }}>
+                  <span style={{ flexShrink: 0, opacity: 0.7, fontFamily: "var(--mono, monospace)" }}>{icon}</span>
+                  <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>{text}</span>
+                  <span style={{ flexShrink: 0, opacity: 0.5, fontSize: 10 }}>{formatTime(item.created_at)}</span>
+                </div>
+              );
+            }
+            // Phase 10 D9 — fallback render: collapsed summary (not raw JSON dump).
             return (
               <div className="signal-card" key={item.signal_id ?? item.reaction_id ?? item.created_at}>
                 <div className="signal-card-head">
@@ -1628,10 +1787,16 @@ function FeedPage() {
                     <div className="handle">@{handle}</div>
                     <div className="ts">{formatTime(item.created_at)}</div>
                   </div>
-                  <div className="signal-channel-badge">{channelLabel}</div>
+                  <div className={`signal-channel-badge${item.is_group ? " channel-badge-group" : ""}`}>
+                    {item.is_group && <span style={{ marginRight: 4, opacity: 0.85 }}>⌘</span>}
+                    {channelLabel}
+                  </div>
                 </div>
                 <div className="signal-body-text" style={{ fontSize: 12 }}>
-                  {typeof p === "object" ? (p.text ?? p.reasoning ?? JSON.stringify(p)) : String(p)}
+                  {typeof p === "object"
+                    ? (p.text ?? p.reasoning ?? p.message ?? p.summary ?? `${item.kind} · ${Object.keys(p).length} fields`)
+                    : String(p)
+                  }
                 </div>
               </div>
             );
@@ -1668,6 +1833,35 @@ function FriendsPage() {
   const [creating, setCreating] = useState(false);
   const [inviteVal, setInviteVal] = useState("");
   const [inviteFb, setInviteFb] = useState<"idle" | "sending" | "sent" | "error">("idle");
+  const [inviteError, setInviteError] = useState("");  // Phase 10 D2 — backend reason透传
+  // Phase 10 D3 — rename / transfer inline editors
+  const [renameMode, setRenameMode] = useState(false);
+  const [renameVal, setRenameVal] = useState("");
+  const [renameFb, setRenameFb] = useState<"idle" | "sending" | "error">("idle");
+  const [renameError, setRenameError] = useState("");
+  const [transferMode, setTransferMode] = useState(false);
+  const [transferVal, setTransferVal] = useState("");
+  const [transferFb, setTransferFb] = useState<"idle" | "sending" | "error">("idle");
+  const [transferError, setTransferError] = useState("");
+  // Phase 10 D4 — inline destructive confirm. Key format: "kind:targetId" e.g.
+  // "kick:abc123" / "leave:gid" / "remove:friend_username". First click sets
+  // pending; second click within 4s executes. Auto-clear via setTimeout.
+  const [pendingDestruct, setPendingDestruct] = useState<string | null>(null);
+  const pendingDestructTimer = useRef<number>(0);
+  const armDestruct = (key: string) => {
+    if (pendingDestructTimer.current) window.clearTimeout(pendingDestructTimer.current);
+    setPendingDestruct(key);
+    pendingDestructTimer.current = window.setTimeout(() => setPendingDestruct(null), 4000);
+  };
+  const clearDestruct = () => {
+    if (pendingDestructTimer.current) window.clearTimeout(pendingDestructTimer.current);
+    setPendingDestruct(null);
+  };
+  // G review Phase 10 #4 fix — cleanup pending timer on unmount to prevent
+  // setState-on-unmounted warnings if user navigates away mid-arm.
+  useEffect(() => () => {
+    if (pendingDestructTimer.current) window.clearTimeout(pendingDestructTimer.current);
+  }, []);
 
   const reload = useCallback(() => {
     apiFetch<{ friends: Friend[] }>("/friends").then(r => { setFriends(r.friends); setFriendsLoaded(true); if (tab === "friends" && !selected && r.friends.length) setSelected(r.friends[0]!.friend_username ?? r.friends[0]!.friend_address); }).catch(() => { setFriendsLoaded(true); });
@@ -1744,6 +1938,7 @@ function FriendsPage() {
   const handleInvite = async () => {
     if (!selectedGroup || !inviteVal.trim()) return;
     setInviteFb("sending");
+    setInviteError("");
     try {
       await apiFetch(`/channels/${selectedGroup}/invite`, { method: "POST", body: JSON.stringify({ username: inviteVal.trim().replace(/^@/, "") }) });
       setInviteFb("sent");
@@ -1751,28 +1946,72 @@ function FriendsPage() {
       apiFetch<{ members: GroupMember[] }>(`/channels/${selectedGroup}/members`).then(r => setGroupMembers(r.members)).catch(() => {});
       reloadGroups();
       setTimeout(() => setInviteFb("idle"), 2000);
-    } catch {
+    } catch (e: any) {
+      // Phase 10 D2 — preserve backend reason for agent decision + user clarity.
+      // Backend returns one of: user_not_found / address is banned from this channel /
+      // channel is full / already a member / invalid_address / rate_limited / not member
       setInviteFb("error");
-      setTimeout(() => setInviteFb("idle"), 2000);
+      setInviteError(e?.message ?? "invite failed");
+      setTimeout(() => { setInviteFb("idle"); setInviteError(""); }, 4000);
     }
   };
 
   const handleLeave = async (channelId: string) => {
-    if (!confirm(lang === "zh" ? "确定退出群组？" : "Leave this group?")) return;
     try {
       await apiFetch(`/channels/${channelId}/leave`, { method: "POST" });
       setSelectedGroup(null);
+      clearDestruct();
       reloadGroups();
     } catch {}
   };
 
   const handleKick = async (channelId: string, addr: string, username: string | null) => {
-    if (!confirm(lang === "zh" ? `确定踢出 @${username ?? addr.slice(0, 8)}？` : `Kick @${username ?? addr.slice(0, 8)}?`)) return;
     try {
       await apiFetch(`/channels/${channelId}/kick`, { method: "POST", body: JSON.stringify({ address: addr }) });
+      clearDestruct();
       apiFetch<{ members: GroupMember[] }>(`/channels/${channelId}/members`).then(r => setGroupMembers(r.members)).catch(() => {});
       reloadGroups();
     } catch {}
+    void username; // keep param signature for inline call site clarity
+  };
+
+  // Phase 10 D3 — rename group (owner only)
+  const handleRename = async () => {
+    if (!selectedGroup || !renameVal.trim()) return;
+    setRenameFb("sending");
+    setRenameError("");
+    try {
+      await apiFetch(`/channels/${selectedGroup}/rename`, { method: "POST", body: JSON.stringify({ name: renameVal.trim().slice(0, 80) }) });
+      setRenameVal("");
+      setRenameMode(false);
+      setRenameFb("idle");
+      reloadGroups();
+    } catch (e: any) {
+      setRenameFb("error");
+      setRenameError(e?.message ?? "rename failed");
+      setTimeout(() => { setRenameFb("idle"); setRenameError(""); }, 4000);
+    }
+  };
+
+  // Phase 10 D3 — transfer ownership (owner only)
+  const handleTransfer = async () => {
+    if (!selectedGroup || !transferVal.trim()) return;
+    setTransferFb("sending");
+    setTransferError("");
+    try {
+      await apiFetch(`/channels/${selectedGroup}/transfer-owner`, {
+        method: "POST",
+        body: JSON.stringify({ username: transferVal.trim().replace(/^@/, "") }),
+      });
+      setTransferVal("");
+      setTransferMode(false);
+      setTransferFb("idle");
+      reloadGroups();
+    } catch (e: any) {
+      setTransferFb("error");
+      setTransferError(e?.message ?? "transfer failed");
+      setTimeout(() => { setTransferFb("idle"); setTransferError(""); }, 4000);
+    }
   };
 
   const selectedFriend = friends.find(f => (f.friend_username ?? f.friend_address) === selected);
@@ -1894,20 +2133,34 @@ function FriendsPage() {
                     </div>
                   </div>
                   <div style={{ marginTop: 16, borderTop: "0.5px solid var(--border-base)", paddingTop: 12, textAlign: "center" }}>
-                    <button
-                      style={{ fontSize: 11, color: "var(--red)", background: "none", border: "0.5px solid var(--border2)", padding: "4px 14px", cursor: "pointer", borderRadius: 3, fontFamily: "var(--mono)", letterSpacing: "0.3px" }}
-                      disabled={removingFriend === friendHandle}
-                      onClick={() => {
-                        if (!confirm(lang === "zh" ? `确定删除 @${friendHandle}？` : `Remove @${friendHandle}?`)) return;
-                        setRemovingFriend(friendHandle);
-                        apiFetch("/friends/remove", { method: "POST", body: JSON.stringify({ username: friendHandle }) })
-                          .then(() => { setSelected(null); reload(); })
-                          .catch(() => {})
-                          .finally(() => setRemovingFriend(null));
-                      }}
-                    >
-                      {removingFriend === friendHandle ? "…" : lang === "zh" ? "删除好友" : "Remove"}
-                    </button>
+                    {(() => {
+                      const removeKey = `remove:${friendHandle}`;
+                      const isPending = pendingDestruct === removeKey;
+                      const isLoading = removingFriend === friendHandle;
+                      return (
+                        <button
+                          style={{
+                            fontSize: 11,
+                            color: isPending ? "#fff" : "var(--red)",
+                            background: isPending ? "var(--red)" : "none",
+                            border: "0.5px solid var(--red)",
+                            padding: "4px 14px", cursor: "pointer", borderRadius: 3, fontFamily: "var(--mono)", letterSpacing: "0.3px",
+                          }}
+                          disabled={isLoading}
+                          onClick={() => {
+                            if (!isPending) { armDestruct(removeKey); return; }
+                            setRemovingFriend(friendHandle);
+                            clearDestruct();
+                            apiFetch("/friends/remove", { method: "POST", body: JSON.stringify({ username: friendHandle }) })
+                              .then(() => { setSelected(null); reload(); })
+                              .catch(() => {})
+                              .finally(() => setRemovingFriend(null));
+                          }}
+                        >
+                          {isLoading ? "…" : isPending ? (lang === "zh" ? "确认删除" : "Confirm remove") : (lang === "zh" ? "删除好友" : "Remove")}
+                        </button>
+                      );
+                    })()}
                   </div>
                 </div>
               </div>
@@ -1919,11 +2172,23 @@ function FriendsPage() {
         <div className="page-inner-flex" style={{ display: "flex", flex: 1, overflow: "hidden" }}>
           <div className="friends-list-col">
             <div className="friends-list-header">
+              {/* Phase 10 D1 — lead 段：解释群组 vs 好友。Susurration north star 是 agent
+                  协作网络，群组是 multi-agent 共享 context；空说明 = 用户不懂为何用群。 */}
+              <div style={{ fontSize: 11, color: "var(--ink-faint)", lineHeight: 1.7, padding: "6px 2px 12px", borderBottom: "0.5px solid var(--border-base)", marginBottom: 12 }}>
+                {lang === "zh"
+                  ? <>⌘ <strong style={{ color: "var(--ink-soft)" }}>群组</strong> — 让多个 agent 在共享 context 协作。这里推送的信号所有成员都能看到，反应也对所有人可见。</>
+                  : <>⌘ <strong style={{ color: "var(--ink-soft)" }}>Groups</strong> — multiple agents collaborating in shared context. Signals you push here reach all members; reactions are visible to everyone.</>
+                }
+              </div>
               <div className="add-friend-row">
-                <input className="add-friend-input" type="text" placeholder={t("groups.namePlaceholder")} value={createName} onChange={(e) => setCreateName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleCreateGroup()} style={{ paddingLeft: 10 }} />
-                <button className="add-btn" onClick={handleCreateGroup} disabled={creating}>
+                <input className="add-friend-input" type="text" placeholder={lang === "zh" ? "群名（可选，例如 btc-scalp）" : "group name (optional, e.g. btc-scalp)"} value={createName} onChange={(e) => setCreateName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleCreateGroup()} style={{ paddingLeft: 10 }} />
+                <button className="add-btn" onClick={handleCreateGroup} disabled={creating || groups.length >= 5}>
                   {creating ? t("groups.creating") : t("groups.create")}
                 </button>
+              </div>
+              {/* Phase 10 D6 — capacity counter (max 5 per address per backend MAX_CHANNELS_PER_ADDRESS) */}
+              <div style={{ fontSize: 10, color: groups.length >= 4 ? "var(--yellow, #f59e0b)" : "var(--ink-faint)", marginTop: 6, paddingLeft: 2 }}>
+                {groups.length}/5 {lang === "zh" ? "个群（owner 上限 5）" : "groups (owner limit 5)"}
               </div>
             </div>
             <div className="friends-list-scroll">
@@ -1935,7 +2200,11 @@ function FriendsPage() {
                 const avatar = (g.name || g.channel_id)[0]!.toUpperCase();
                 return (
                   <div key={g.channel_id} className={`friend-item ${selectedGroup === g.channel_id ? "selected" : ""}`} onClick={() => setSelectedGroup(g.channel_id)}>
-                    <div className="friend-avatar">{avatar}</div>
+                    {/* Phase 10 D5 — square avatar + ⌘ icon to distinguish from round friend avatars */}
+                    <div className="friend-avatar" style={{ borderRadius: 4, position: "relative" }}>
+                      {avatar}
+                      <span style={{ position: "absolute", bottom: -2, right: -2, fontSize: 8, background: "var(--surface)", borderRadius: "50%", width: 12, height: 12, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--ink-soft)" }}>⌘</span>
+                    </div>
                     <div className="friend-info">
                       <div className="friend-handle" style={!g.name ? { color: "var(--ink-faint)", fontStyle: "italic" } : undefined}>{name}</div>
                       <div className="friend-last">{g.member_count} {g.member_count === 1 ? t("groups.member") : t("groups.members")}</div>
@@ -1945,24 +2214,59 @@ function FriendsPage() {
               })}
             </div>
           </div>
-          {activeGroup && (
+          {activeGroup && (() => {
+            const iAmOwner = activeGroup.owner === auth.address;
+            const leaveKey = `leave:${activeGroup.channel_id}`;
+            return (
             <div className="friends-detail-col">
               <div className="friend-profile-card">
                 <div className="friend-profile-top">
-                  <div className="friend-avatar-lg">{(activeGroup.name || activeGroup.channel_id)[0]!.toUpperCase()}</div>
-                  <div>
-                    <div className="friend-name" style={!activeGroup.name ? { color: "var(--ink-faint)", fontStyle: "italic" } : undefined}>{activeGroup.name || t("groups.unnamed")}</div>
+                  <div className="friend-avatar-lg" style={{ borderRadius: 6 }}>{(activeGroup.name || activeGroup.channel_id)[0]!.toUpperCase()}</div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    {!renameMode ? (
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <div className="friend-name" style={!activeGroup.name ? { color: "var(--ink-faint)", fontStyle: "italic" } : undefined}>{activeGroup.name || t("groups.unnamed")}</div>
+                        {iAmOwner && (
+                          <button
+                            onClick={() => { setRenameMode(true); setRenameVal(activeGroup.name ?? ""); }}
+                            style={{ fontSize: 10, color: "var(--ink-faint)", background: "none", border: "0.5px solid var(--border2)", padding: "1px 6px", cursor: "pointer", borderRadius: 3, fontFamily: "var(--mono)" }}
+                            title={lang === "zh" ? "改名" : "rename"}
+                          >
+                            ✎
+                          </button>
+                        )}
+                      </div>
+                    ) : (
+                      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                        <input
+                          type="text" value={renameVal} maxLength={80}
+                          onChange={(e) => setRenameVal(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") handleRename(); if (e.key === "Escape") { setRenameMode(false); setRenameError(""); } }}
+                          style={{ flex: 1, background: "var(--surface)", border: "0.5px solid var(--border-base)", borderRadius: 4, padding: "3px 8px", fontSize: 12, fontFamily: "var(--mono)", color: "var(--ink)", outline: "none" }}
+                          autoFocus
+                        />
+                        <button onClick={handleRename} disabled={renameFb === "sending"} style={{ fontSize: 11, color: "var(--green)", background: "none", border: "0.5px solid var(--border2)", padding: "2px 8px", cursor: "pointer", borderRadius: 3 }}>{renameFb === "sending" ? "…" : "✓"}</button>
+                        <button onClick={() => { setRenameMode(false); setRenameError(""); }} style={{ fontSize: 11, color: "var(--ink-faint)", background: "none", border: "0.5px solid var(--border2)", padding: "2px 8px", cursor: "pointer", borderRadius: 3 }}>✗</button>
+                      </div>
+                    )}
+                    {renameError && <div style={{ fontSize: 10, color: "var(--red)", marginTop: 4 }}>{renameError}</div>}
                     <div className="friend-sub">{activeGroup.member_count} {activeGroup.member_count === 1 ? t("groups.member") : t("groups.members")} · {new Date(activeGroup.created_at).toLocaleDateString()}</div>
                   </div>
                 </div>
                 {/* Invite row */}
-                {activeGroup.owner === auth.address ? (
-                  <div style={{ display: "flex", gap: 6, marginTop: 16, borderTop: "0.5px solid var(--border-base)", paddingTop: 12 }}>
-                    <span style={{ color: "var(--ink-faint)", fontSize: 12, lineHeight: "28px" }}>@</span>
-                    <input type="text" placeholder={t("groups.invitePlaceholder")} value={inviteVal} onChange={(e) => setInviteVal(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleInvite()} style={{ flex: 1, background: "var(--surface)", border: "0.5px solid var(--border-base)", borderRadius: 6, padding: "4px 8px", fontSize: 12, fontFamily: "var(--mono)", color: "var(--ink)", outline: "none" }} />
-                    <button className="add-btn" onClick={handleInvite} disabled={inviteFb === "sending"} style={inviteFb === "sent" ? { color: "var(--green)" } : inviteFb === "error" ? { color: "var(--red)" } : undefined}>
-                      {inviteFb === "sending" ? t("groups.inviting") : inviteFb === "sent" ? t("groups.invited") : t("groups.invite")}
-                    </button>
+                {iAmOwner ? (
+                  <div style={{ marginTop: 16, borderTop: "0.5px solid var(--border-base)", paddingTop: 12 }}>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <span style={{ color: "var(--ink-faint)", fontSize: 12, lineHeight: "28px" }}>@</span>
+                      <input type="text" placeholder={t("groups.invitePlaceholder")} value={inviteVal} onChange={(e) => setInviteVal(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleInvite()} style={{ flex: 1, background: "var(--surface)", border: "0.5px solid var(--border-base)", borderRadius: 6, padding: "4px 8px", fontSize: 12, fontFamily: "var(--mono)", color: "var(--ink)", outline: "none" }} />
+                      <button className="add-btn" onClick={handleInvite} disabled={inviteFb === "sending"} style={inviteFb === "sent" ? { color: "var(--green)" } : inviteFb === "error" ? { color: "var(--red)" } : undefined}>
+                        {inviteFb === "sending" ? t("groups.inviting") : inviteFb === "sent" ? t("groups.invited") : t("groups.invite")}
+                      </button>
+                    </div>
+                    {/* Phase 10 D2 — show backend error reason inline (not just red flash) */}
+                    {inviteError && (
+                      <div style={{ fontSize: 10, color: "var(--red)", marginTop: 6, lineHeight: 1.5 }}>{inviteError}</div>
+                    )}
                   </div>
                 ) : (
                   <div style={{ marginTop: 16, borderTop: "0.5px solid var(--border-base)", paddingTop: 10, fontSize: 11, color: "var(--ink-faint)", fontStyle: "italic" }}>
@@ -1975,7 +2279,8 @@ function FriendsPage() {
                     const handle = m.username ?? m.address.slice(0, 8);
                     const isOwner = m.address === activeGroup.owner;
                     const isMe = m.address === auth.address;
-                    const iAmOwner = activeGroup.owner === auth.address;
+                    const kickKey = `kick:${activeGroup.channel_id}:${m.address}`;
+                    const kickPending = pendingDestruct === kickKey;
                     return (
                       <div key={m.address} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "0.5px solid var(--border-base)" }}>
                         <div className="friend-avatar" style={{ width: 24, height: 24, fontSize: 10, lineHeight: "24px" }}>{(m.username || m.address)[0]!.toUpperCase()}</div>
@@ -1985,26 +2290,74 @@ function FriendsPage() {
                           {isMe && <span style={{ marginLeft: 6, fontSize: 10, color: "var(--ink-faint)" }}>({t("groups.you")})</span>}
                         </div>
                         {iAmOwner && !isMe && (
-                          <button onClick={() => handleKick(activeGroup.channel_id, m.address, m.username)} style={{ fontSize: 11, color: "var(--red)", background: "none", border: "0.5px solid var(--border2)", padding: "2px 8px", cursor: "pointer", borderRadius: 4, fontFamily: "var(--mono)", letterSpacing: "0.3px" }}>
-                            {t("groups.kick")}
+                          /* Phase 10 D4 — inline 2-step confirm replaces native confirm() */
+                          <button
+                            onClick={() => kickPending ? handleKick(activeGroup.channel_id, m.address, m.username) : armDestruct(kickKey)}
+                            style={{
+                              fontSize: 11, color: kickPending ? "#fff" : "var(--red)",
+                              background: kickPending ? "var(--red)" : "none",
+                              border: "0.5px solid var(--red)", padding: "2px 8px",
+                              cursor: "pointer", borderRadius: 4, fontFamily: "var(--mono)", letterSpacing: "0.3px",
+                            }}
+                          >
+                            {kickPending ? (lang === "zh" ? `确认踢出` : `Confirm kick`) : t("groups.kick")}
                           </button>
                         )}
                       </div>
                     );
                   })}
                 </div>
-                {/* Leave button */}
+                {/* Phase 10 D3 — owner-only transfer ownership inline */}
+                {iAmOwner && (
+                  <div style={{ marginTop: 16, borderTop: "0.5px solid var(--border-base)", paddingTop: 12 }}>
+                    {!transferMode ? (
+                      <button
+                        onClick={() => setTransferMode(true)}
+                        style={{ fontSize: 11, color: "var(--ink-soft)", background: "none", border: "0.5px solid var(--border2)", padding: "4px 12px", cursor: "pointer", borderRadius: 4, fontFamily: "var(--mono)", letterSpacing: "0.3px" }}
+                      >
+                        {lang === "zh" ? "转让群主" : "Transfer ownership"}
+                      </button>
+                    ) : (
+                      <div>
+                        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                          <span style={{ color: "var(--ink-faint)", fontSize: 12 }}>@</span>
+                          <input
+                            type="text" placeholder={lang === "zh" ? "新群主用户名" : "new owner username"}
+                            value={transferVal} onChange={(e) => setTransferVal(e.target.value)}
+                            onKeyDown={(e) => { if (e.key === "Enter") handleTransfer(); if (e.key === "Escape") { setTransferMode(false); setTransferError(""); } }}
+                            style={{ flex: 1, background: "var(--surface)", border: "0.5px solid var(--border-base)", borderRadius: 4, padding: "3px 8px", fontSize: 12, fontFamily: "var(--mono)", color: "var(--ink)", outline: "none" }}
+                            autoFocus
+                          />
+                          <button onClick={handleTransfer} disabled={transferFb === "sending"} style={{ fontSize: 11, color: "var(--green)", background: "none", border: "0.5px solid var(--border2)", padding: "2px 8px", cursor: "pointer", borderRadius: 3 }}>{transferFb === "sending" ? "…" : "✓"}</button>
+                          <button onClick={() => { setTransferMode(false); setTransferError(""); }} style={{ fontSize: 11, color: "var(--ink-faint)", background: "none", border: "0.5px solid var(--border2)", padding: "2px 8px", cursor: "pointer", borderRadius: 3 }}>✗</button>
+                        </div>
+                        {transferError && <div style={{ fontSize: 10, color: "var(--red)", marginTop: 4 }}>{transferError}</div>}
+                        <div style={{ fontSize: 10, color: "var(--ink-faint)", marginTop: 4 }}>
+                          {lang === "zh" ? "新群主必须已是当前成员。转让后你失去 owner 权限。" : "New owner must already be a member. You'll lose owner rights after transfer."}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {/* Leave button — Phase 10 D4 inline 2-step confirm */}
                 <div style={{ marginTop: 16, borderTop: "0.5px solid var(--border-base)", paddingTop: 12, textAlign: "center" }}>
                   <button
-                    onClick={() => handleLeave(activeGroup.channel_id)}
-                    style={{ fontSize: 11, color: "var(--red)", background: "none", border: "0.5px solid var(--border2)", padding: "4px 14px", cursor: "pointer", borderRadius: 4, fontFamily: "var(--mono)", letterSpacing: "0.3px" }}
+                    onClick={() => pendingDestruct === leaveKey ? handleLeave(activeGroup.channel_id) : armDestruct(leaveKey)}
+                    style={{
+                      fontSize: 11,
+                      color: pendingDestruct === leaveKey ? "#fff" : "var(--red)",
+                      background: pendingDestruct === leaveKey ? "var(--red)" : "none",
+                      border: "0.5px solid var(--red)", padding: "4px 14px",
+                      cursor: "pointer", borderRadius: 4, fontFamily: "var(--mono)", letterSpacing: "0.3px",
+                    }}
                   >
-                    {t("groups.leave")}
+                    {pendingDestruct === leaveKey ? (lang === "zh" ? "确认退出群组" : "Confirm leave") : t("groups.leave")}
                   </button>
                 </div>
               </div>
             </div>
-          )}
+            );
+          })()}
         </div>
       )}
     </div>
@@ -2274,13 +2627,13 @@ export function DashboardPage() {
           {showOnboarding && <Onboarding onComplete={() => setShowOnboarding(false)} />}
           <Sidebar page={page} setPage={setPagePersist} hasNewActivity={hasNewActivity} />
           <div className="dash-content">
-            {visited.has("dashboard") && <div style={{ display: page === "dashboard" ? "flex" : "none", flexDirection: "column", height: "100%" }}><DashHome /></div>}
-            {visited.has("feed") && <div style={{ display: page === "feed" ? "flex" : "none", flexDirection: "column", height: "100%" }}><FeedPage /></div>}
-            {visited.has("friends") && <div style={{ display: page === "friends" ? "flex" : "none", flexDirection: "column", height: "100%" }}><FriendsPage /></div>}
-            {visited.has("mode") && <div style={{ display: page === "mode" ? "flex" : "none", flexDirection: "column", height: "100%" }}><ModePage /></div>}
-            {visited.has("settings") && <div style={{ display: page === "settings" ? "flex" : "none", flexDirection: "column", height: "100%" }}><SettingsPage onShowOnboarding={() => setShowOnboarding(true)} /></div>}
+            {visited.has("dashboard") && <div style={{ display: page === "dashboard" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0 }}><DashHome /></div>}
+            {visited.has("feed") && <div style={{ display: page === "feed" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0 }}><FeedPage /></div>}
+            {visited.has("friends") && <div style={{ display: page === "friends" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0 }}><FriendsPage /></div>}
+            {visited.has("mode") && <div style={{ display: page === "mode" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0 }}><ModePage /></div>}
+            {visited.has("settings") && <div style={{ display: page === "settings" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0 }}><SettingsPage onShowOnboarding={() => setShowOnboarding(true)} /></div>}
+            <StatusBar />
           </div>
-          <StatusBar />
         </div>
         </ActivityBadgeContext.Provider>
       </NavContext.Provider>

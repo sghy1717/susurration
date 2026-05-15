@@ -254,14 +254,21 @@ async function main(): Promise<number> {
   const limiter = new MinuteRateLimiter(cfg.agent.max_calls_per_minute!);
 
   // Built-in paper trading (replaces the old on_decision hook spawn pattern).
+  // Phase 11a — pass susu client so opens/closes mirror to server for
+  // cross-device visibility. New device login → dashboard sees full history.
   const paperTrader = cfg.paper_trading?.enabled
     ? new PaperTrader(
         join(process.env.HOME ?? ".", ".susu", "paper_trades.json"),
         cfg.paper_trading.min_size_factor ?? 0.5,
         cfg.paper_trading.max_open,
         cfg.event_log_path,
+        susu,
       )
     : null;
+  // Phase 11a — best-effort startup backfill from server (after reinstall / new device).
+  if (paperTrader) {
+    void paperTrader.syncFromServerOnce();
+  }
 
   // Discover own address + handle so we can skip self-events.
   let myAddress: string | null = null;
@@ -686,12 +693,27 @@ async function handleEvent(
 
   // Fire-and-forget decision telemetry — lets backend distinguish
   // "silent daemon" (running but all noop) vs "dead daemon" (not connected).
+  // Phase 11b — also writes plaintext to /daemon_decisions for cross-device
+  // user-visible decision history (with reasoning_summary capped 500 chars).
+  const decisionAny = decision as any;
+  const reasoningSummary: string | undefined =
+    typeof decisionAny?.payload?.note === "string" ? decisionAny.payload.note :
+    typeof decisionAny?.note === "string" ? decisionAny.note :
+    typeof decisionAny?.reasoning === "string" ? decisionAny.reasoning :
+    undefined;
+  const reactionId = (result as any)?.reaction_id ?? undefined;
   reportDaemonDecision(susu, {
     kind: error ? "error" : decision.kind,
-    signal_id: decision.kind === "react" ? decision.signal_id : undefined,
+    signal_id: decision.kind === "react" ? decision.signal_id :
+               (evt.kind === "signal" && (evt as any).signal_id) ? (evt as any).signal_id : undefined,
+    channel_id: (evt as any).channel_id,
+    reaction_id: reactionId,
     event_kind: evt.kind,
     error_type: error ? "execute_failed" : undefined,
     latency_ms: Date.now() - decisionStartedAt,
+    llm_provider: cfg.llm.provider,
+    llm_model: cfg.llm.model,
+    reasoning_summary: reasoningSummary,
     context: {
       provider: cfg.llm.provider ?? "unknown",
       model: cfg.llm.model ?? "unknown",

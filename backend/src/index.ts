@@ -18,6 +18,8 @@ import { onboardingEventRoutes } from "./routes/onboarding_events.ts";
 import { daemonEventRoutes } from "./routes/daemon_events.ts";
 import { installerEventRoutes } from "./routes/installer_events.ts";
 import { connectivityTestRoutes } from "./routes/connectivity_test.ts";
+import { paperPositionsRoutes } from "./routes/paper_positions.ts";
+import { daemonDecisionsRoutes } from "./routes/daemon_decisions.ts";
 import { adminRoutes } from "./routes/admin.ts";
 import { validateSolanaConfig } from "./lib/solana.ts";
 
@@ -102,6 +104,9 @@ app.use("/api/installer/ide-detected", bodyLimit({ maxSize: DEFAULT_BODY_MAX, on
 app.use("/api/installer/stage", bodyLimit({ maxSize: DEFAULT_BODY_MAX, onError: onTooLarge }));
 app.use("/api/installer/complete", bodyLimit({ maxSize: DEFAULT_BODY_MAX, onError: onTooLarge }));
 app.use("/api/connectivity-test/trigger", bodyLimit({ maxSize: DEFAULT_BODY_MAX, onError: onTooLarge }));
+app.use("/api/paper_positions/open", bodyLimit({ maxSize: DEFAULT_BODY_MAX, onError: onTooLarge }));
+app.use("/api/paper_positions/close", bodyLimit({ maxSize: DEFAULT_BODY_MAX, onError: onTooLarge }));
+app.use("/api/daemon_decisions", bodyLimit({ maxSize: DEFAULT_BODY_MAX, onError: onTooLarge }));
 
 // G3-R-1 fix v2: drain the body to a Buffer BEFORE the route handler runs.
 // Why: when chunked Transfer-Encoding overflows bodyLimit's stream wrapper,
@@ -236,6 +241,8 @@ api.route("/", onboardingEventRoutes);
 api.route("/", daemonEventRoutes);
 api.route("/", installerEventRoutes);
 api.route("/", connectivityTestRoutes);
+api.route("/", paperPositionsRoutes);
+api.route("/", daemonDecisionsRoutes);
 // Admin routes registered BEFORE the catch-all so /api/admin/* doesn't 404.
 api.route("/", adminRoutes);
 // G7 P0 #1 follow-up: any unmatched /api/* must return JSON 404, NOT fall
@@ -259,6 +266,8 @@ const POST_ONLY_API_PATTERNS: RegExp[] = [
   /^\/client-errors$/,
   /^\/installer\/(started|ide-detected|stage|complete)$/,
   /^\/connectivity-test\/trigger$/,
+  /^\/paper_positions\/(open|close)$/,
+  /^\/daemon_decisions$/,
   /^\/admin\/usernames$/,
   /^\/admin\/usernames\/[^/]+\/grant$/,
   /^\/admin\/reclaim-handle$/,
