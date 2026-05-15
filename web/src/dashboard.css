@@ -577,7 +577,10 @@
 .sig-cell-val.long  { color: var(--green); }
 .sig-cell-val.short { color: var(--red); }
 .signal-body-text {
-  font-size: 12px; color: var(--ink-soft); line-height: 1.7; font-style: italic;
+  /* Phase 12 H #14 — was italic; mono italic = oblique, hurts readability.
+     Replaced with quote-style left border + softer color. */
+  font-size: 12px; color: var(--ink-soft); line-height: 1.7;
+  border-left: 2px solid var(--border-base); padding-left: 10px;
 }
 .signal-card-foot {
   display: flex; align-items: center; gap: 8px;
@@ -697,7 +700,8 @@
   background: linear-gradient(90deg, var(--border-base) 0%, var(--border2, rgba(255,255,255,0.04)) 50%, var(--border-base) 100%);
   background-size: 200% 100%;
   border-radius: 2px;
-  animation: skel-shimmer 2.4s ease-in-out infinite;
+  /* Phase 12 H #15 — was 2.4s, inconsistent with skeleton-shimmer 1.5s; align faster perceived loading */
+  animation: skel-shimmer 1.4s ease-in-out infinite;
 }
 .skel-w-token  { width: 40%; }
 .skel-w-dir    { width: 60%; }
@@ -722,10 +726,11 @@
   padding: 4px 16px;
   background: var(--paper);
   border-top: 0.5px solid var(--border-base);
-  font-size: 10px;
+  /* Phase 12 H #13 — was 10px / 0.5px ls; harsh on 1366×768 laptops */
+  font-size: 11px;
   color: var(--ink-faint);
   font-family: var(--mono);
-  letter-spacing: 0.5px;
+  letter-spacing: 0.3px;
   min-height: 30px;
 }
 .status-bar-left { display: flex; align-items: center; gap: 12px; }

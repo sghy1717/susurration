@@ -2201,7 +2201,8 @@ function FriendsPage() {
                 return (
                   <div key={g.channel_id} className={`friend-item ${selectedGroup === g.channel_id ? "selected" : ""}`} onClick={() => setSelectedGroup(g.channel_id)}>
                     {/* Phase 10 D5 — square avatar + ⌘ icon to distinguish from round friend avatars */}
-                    <div className="friend-avatar" style={{ borderRadius: 4, position: "relative" }}>
+                    {/* Phase 12 H #5 — group=6px rounded square (vs friends round); Linear/Slack convention */}
+                    <div className="friend-avatar" style={{ borderRadius: 6, position: "relative" }}>
                       {avatar}
                       <span style={{ position: "absolute", bottom: -2, right: -2, fontSize: 8, background: "var(--surface)", borderRadius: "50%", width: 12, height: 12, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--ink-soft)" }}>⌘</span>
                     </div>
@@ -2221,6 +2222,7 @@ function FriendsPage() {
             <div className="friends-detail-col">
               <div className="friend-profile-card">
                 <div className="friend-profile-top">
+                  {/* Phase 12 H #5 — group large avatar matches list (6px square) */}
                   <div className="friend-avatar-lg" style={{ borderRadius: 6 }}>{(activeGroup.name || activeGroup.channel_id)[0]!.toUpperCase()}</div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     {!renameMode ? (
