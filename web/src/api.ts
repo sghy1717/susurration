@@ -4,6 +4,28 @@
 const TOKEN_KEY = "susu.token";
 const ADDRESS_KEY = "susu.address";
 
+// Phase 18.2-w — v0 dashboard wrote tokens under `susu_token` /
+// `susu_address` (underscores). v2 was authored with `susu.token` /
+// `susu.address` (dots). When /dashboard started redirecting to
+// /v2/overview, users who'd previously logged in via v0 hit v2 unauthed
+// because the key didn't match. We treat the v0 keys as a read-only
+// fallback + migrate-on-write so the next session sets v2 keys, then
+// gradually drains the v0 ones.
+const LEGACY_TOKEN_KEY = "susu_token";
+const LEGACY_ADDRESS_KEY = "susu_address";
+
+function readWithFallback(key: string, legacyKey: string): string | null {
+  const v = localStorage.getItem(key);
+  if (v != null) return v;
+  const legacy = localStorage.getItem(legacyKey);
+  if (legacy != null) {
+    // Mirror v0 → v2 so subsequent reads find it under the v2 key without
+    // hitting the legacy slot. Idempotent across calls.
+    try { localStorage.setItem(key, legacy); } catch { /* quota / private mode */ }
+  }
+  return legacy;
+}
+
 export const apiBase: string =
   (import.meta as any).env?.VITE_SUSU_API_URL ?? "/api";
 
@@ -39,14 +61,22 @@ export async function api<T = any>(call: ApiCall<T>): Promise<T> {
 }
 
 export const session = {
-  get token(): string | null { return localStorage.getItem(TOKEN_KEY); },
-  get address(): string | null { return localStorage.getItem(ADDRESS_KEY); },
+  get token(): string | null { return readWithFallback(TOKEN_KEY, LEGACY_TOKEN_KEY); },
+  get address(): string | null { return readWithFallback(ADDRESS_KEY, LEGACY_ADDRESS_KEY); },
   set(token: string, address: string) {
+    // Write to both key shapes so users bouncing between v0 (/v0/dashboard
+    // escape hatch) and v2 stay logged in either way during the transition.
     localStorage.setItem(TOKEN_KEY, token);
     localStorage.setItem(ADDRESS_KEY, address);
+    try {
+      localStorage.setItem(LEGACY_TOKEN_KEY, token);
+      localStorage.setItem(LEGACY_ADDRESS_KEY, address);
+    } catch { /* quota */ }
   },
   clear() {
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(ADDRESS_KEY);
+    localStorage.removeItem(LEGACY_TOKEN_KEY);
+    localStorage.removeItem(LEGACY_ADDRESS_KEY);
   },
 };
