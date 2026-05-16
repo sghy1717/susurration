@@ -168,8 +168,14 @@ function OverviewBody() {
                       <th>Side</th>
                       <th>From</th>
                       <th>SL · Mark · TP</th>
-                      <th className="num">PnL</th>
-                      <th className="num">Duration</th>
+                      {/* Phase 18.2-w UX fix — PnL + Duration headers and
+                          values left-align to match Asset / Mode / etc.
+                          The lone right-aligned column read as inconsistent
+                          per Haze. tabular-nums on the table keeps digit
+                          widths uniform so the left edge of each value still
+                          sits on the same x across rows. */}
+                      <th>PnL</th>
+                      <th>Duration</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -317,12 +323,18 @@ function PositionRow({ p, mark, now }: { p: Position; mark: number | null; now: 
           mark={mark}
         />
       </td>
-      <td className="num" style={{ color: pnl == null ? "var(--susu-ink-subtle)" : pnl >= 0 ? "var(--susu-pos)" : "var(--susu-neg)" }}>
+      <td style={{
+        fontFamily: "var(--susu-mono)",
+        fontVariantNumeric: "tabular-nums",
+        color: pnl == null ? "var(--susu-ink-subtle)" : pnl >= 0 ? "var(--susu-pos)" : "var(--susu-neg)",
+      }}>
         {pnl == null ? "—" : (
           <TickValue value={pnl} format={v => formatPnl(typeof v === "number" ? v : Number(v))} />
         )}
       </td>
-      <td className="num">{durationStr(p.opened_at, now)}</td>
+      <td style={{ fontFamily: "var(--susu-mono)", fontVariantNumeric: "tabular-nums" }}>
+        {durationStr(p.opened_at, now)}
+      </td>
     </tr>
   );
 }
