@@ -73,7 +73,19 @@ function OverviewBody() {
       }}>
         <div>
           <Eyebrow>book · last 21 days</Eyebrow>
-          <h1 className="susu-h1" style={{ marginTop: "var(--susu-s-2)" }}>
+          {/* Phase 18.2-w UX pass — reserve two lines of height so the
+              hero doesn't reflow between 1 and 2 lines as the live PnL
+              digit count changes (e.g. +$471.53 fits one line, +$1,034.00
+              wraps to two). Below content (KPI strip, panels) stays put.
+              line-height in tokens.css is 1.12; 2 × 1.12em + a little
+              slack covers descenders and the gap. */}
+          <h1
+            className="susu-h1"
+            style={{
+              marginTop: "var(--susu-s-2)",
+              minHeight: "2.4em",
+            }}
+          >
             Your agent traded{" "}
             <TickValue
               value={totalPnl}
