@@ -399,16 +399,38 @@ export function ModeBadge({ mode }: { mode: "paper" | "live" }) {
 
 // ── Equity curve — SVG sparkline with breathing endpoint halo ────────────
 
+// Phase 18.2-w — EquityCurve accepts an optional `secondaryPoints` series so
+// Overview can overlay paper and live books on the same axes (paper = green,
+// live = amber, matching ModeBadge). The primary line dominates legibly;
+// the secondary uses a thinner stroke + no fill + no breathing halo, so a
+// flat / empty live curve doesn't clutter the chart when the user has only
+// run paper.
+
+const PRIMARY_COLOR = "#34d399";   // paper / single-mode default
+const SECONDARY_COLOR = "#f6c177"; // live overlay
+
 export function EquityCurve({
   points,
+  secondaryPoints,
   initialBalance,
   height = 180,
+  primaryColor = PRIMARY_COLOR,
+  primaryLabel,
+  secondaryLabel = "live",
 }: {
   points: { day: string; realized_cumulative_usd: number }[];
+  /** Optional second series, rendered as a lighter overlay. */
+  secondaryPoints?: { day: string; realized_cumulative_usd: number }[];
   initialBalance: number;
   height?: number;
+  /** Hex for primary line; defaults to paper green. Live-only views may pass amber. */
+  primaryColor?: string;
+  /** Optional inline legend chip for primary. Omit to suppress legend. */
+  primaryLabel?: string;
+  /** Inline legend chip for secondary. */
+  secondaryLabel?: string;
 }) {
-  if (points.length === 0) {
+  if (points.length === 0 && (!secondaryPoints || secondaryPoints.length === 0)) {
     return (
       <div className="susu-panel" style={{ padding: "var(--susu-s-5)", color: "var(--susu-ink-subtle)" }}>
         No history yet — your agent's first closed position will populate this curve.
@@ -416,60 +438,118 @@ export function EquityCurve({
     );
   }
 
-  // Convert to balance series (initial + cumulative realized).
-  const balances = points.map(p => initialBalance + p.realized_cumulative_usd);
-  const minB = Math.min(...balances, initialBalance);
-  const maxB = Math.max(...balances, initialBalance);
-  const span = Math.max(1, maxB - minB);
   const W = 720;
   const H = height;
   const padTop = 24;
   const padBot = 24;
   const yRange = H - padTop - padBot;
-  const stepX = points.length > 1 ? W / (points.length - 1) : W;
 
-  const pts = balances.map((b, i) => {
-    const x = i * stepX;
-    const y = padTop + yRange * (1 - (b - minB) / span);
-    return { x, y };
-  });
-  const linePath = pts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
-  const fillPath = `${linePath} L${pts[pts.length - 1]!.x.toFixed(1)},${H} L0,${H} Z`;
-  const tail = pts[pts.length - 1]!;
+  // Map both series to balance arrays. If one is empty, we still need a
+  // y-range that includes the other + the initial balance baseline.
+  const primaryBalances = points.map(p => initialBalance + p.realized_cumulative_usd);
+  const secondaryBalances = (secondaryPoints ?? []).map(p => initialBalance + p.realized_cumulative_usd);
+  const allBalances = [...primaryBalances, ...secondaryBalances, initialBalance];
+  const minB = Math.min(...allBalances);
+  const maxB = Math.max(...allBalances);
+  const span = Math.max(1, maxB - minB);
+
+  // Each series gets its own x scale based on its own length. They should
+  // both be `days` long in practice (server returns one row per calendar
+  // day), so the x axes will coincide.
+  const buildPts = (balances: number[]) => {
+    if (balances.length === 0) return [] as { x: number; y: number }[];
+    const stepX = balances.length > 1 ? W / (balances.length - 1) : W;
+    return balances.map((b, i) => ({
+      x: i * stepX,
+      y: padTop + yRange * (1 - (b - minB) / span),
+    }));
+  };
+  const ptsPrimary = buildPts(primaryBalances);
+  const ptsSecondary = buildPts(secondaryBalances);
+
+  const pathOf = (pts: { x: number; y: number }[]) =>
+    pts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+
+  const primaryPath = pathOf(ptsPrimary);
+  const secondaryPath = pathOf(ptsSecondary);
+
+  const primaryFill = ptsPrimary.length > 0
+    ? `${primaryPath} L${ptsPrimary[ptsPrimary.length - 1]!.x.toFixed(1)},${H} L0,${H} Z`
+    : "";
+
+  const primaryTail = ptsPrimary.length > 0 ? ptsPrimary[ptsPrimary.length - 1]! : null;
+  const secondaryTail = ptsSecondary.length > 0 ? ptsSecondary[ptsSecondary.length - 1]! : null;
+
+  const lastBalance = primaryBalances.length > 0
+    ? primaryBalances[primaryBalances.length - 1]!
+    : initialBalance;
   const ddPercent = ((minB - initialBalance) / initialBalance) * 100;
-  const lastBalance = balances[balances.length - 1]!;
+
+  // Use a stable gradient id keyed on color so multiple curves on one page
+  // don't share defs (rare in practice but defensive).
+  const gradId = `susu-eq-grad-${primaryColor.replace("#", "")}`;
+  const showLegend = !!primaryLabel && ptsSecondary.length > 0;
+  const labelDays = points.length || (secondaryPoints?.length ?? 0);
 
   return (
     <div className="susu-panel">
       <div style={{ padding: "var(--susu-s-5)" }}>
         <div style={{
-          display: "flex", justifyContent: "space-between", alignItems: "baseline",
+          display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "var(--susu-s-3)",
           marginBottom: "var(--susu-s-3)",
           fontFamily: "var(--susu-mono)", fontSize: 11, color: "var(--susu-ink-subtle)",
         }}>
           <span>
             ${initialBalance.toLocaleString()} → ${lastBalance.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-            {" · "}{points.length} days
+            {" · "}{labelDays} days
             {ddPercent < 0 ? ` · max DD ${ddPercent.toFixed(2)}%` : ""}
           </span>
+          {showLegend && (
+            <span style={{ display: "flex", gap: "var(--susu-s-3)" }}>
+              <LegendChip color={primaryColor} label={primaryLabel!} />
+              <LegendChip color={SECONDARY_COLOR} label={secondaryLabel} />
+            </span>
+          )}
         </div>
         <svg viewBox={`0 0 ${W + 20} ${H}`} style={{ width: "100%", height }} preserveAspectRatio="none">
           <defs>
-            <linearGradient id="susu-eq-grad" x1="0" x2="0" y1="0" y2="1">
-              <stop offset="0%" stopColor="#34d399" stopOpacity="0.24" />
-              <stop offset="100%" stopColor="#34d399" stopOpacity="0" />
+            <linearGradient id={gradId} x1="0" x2="0" y1="0" y2="1">
+              <stop offset="0%" stopColor={primaryColor} stopOpacity="0.24" />
+              <stop offset="100%" stopColor={primaryColor} stopOpacity="0" />
             </linearGradient>
           </defs>
           <line x1="0" y1={padTop} x2={W + 20} y2={padTop} stroke="rgba(255,255,255,0.04)" />
           <line x1="0" y1={H / 2} x2={W + 20} y2={H / 2} stroke="rgba(255,255,255,0.06)" strokeDasharray="2 3" />
           <line x1="0" y1={H - padBot} x2={W + 20} y2={H - padBot} stroke="rgba(255,255,255,0.04)" />
-          <path d={fillPath} fill="url(#susu-eq-grad)" />
-          <path d={linePath} fill="none" stroke="#34d399" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-          <circle cx={tail.x} cy={tail.y} r="6" fill="#34d399" opacity="0.32">
-            <animate attributeName="r"       values="6;14;6"      dur="2.4s" repeatCount="indefinite" />
-            <animate attributeName="opacity" values="0.32;0;0.32" dur="2.4s" repeatCount="indefinite" />
-          </circle>
-          <circle cx={tail.x} cy={tail.y} r="3" fill="#34d399" />
+          {primaryFill && <path d={primaryFill} fill={`url(#${gradId})`} />}
+          {/* Secondary first so primary draws on top — clearer hierarchy. */}
+          {secondaryPath && (
+            <path
+              d={secondaryPath}
+              fill="none"
+              stroke={SECONDARY_COLOR}
+              strokeWidth="1.25"
+              strokeOpacity="0.85"
+              strokeDasharray="3 2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          )}
+          {primaryPath && (
+            <path d={primaryPath} fill="none" stroke={primaryColor} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          )}
+          {primaryTail && (
+            <>
+              <circle cx={primaryTail.x} cy={primaryTail.y} r="6" fill={primaryColor} opacity="0.32">
+                <animate attributeName="r"       values="6;14;6"      dur="2.4s" repeatCount="indefinite" />
+                <animate attributeName="opacity" values="0.32;0;0.32" dur="2.4s" repeatCount="indefinite" />
+              </circle>
+              <circle cx={primaryTail.x} cy={primaryTail.y} r="3" fill={primaryColor} />
+            </>
+          )}
+          {secondaryTail && (
+            <circle cx={secondaryTail.x} cy={secondaryTail.y} r="2.5" fill={SECONDARY_COLOR} />
+          )}
         </svg>
         <div style={{
           display: "flex", justifyContent: "space-between",
@@ -488,6 +568,17 @@ export function EquityCurve({
         </div>
       </div>
     </div>
+  );
+}
+
+function LegendChip({ color, label }: { color: string; label: string }) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "var(--susu-ink-subtle)" }}>
+      <span style={{
+        display: "inline-block", width: 8, height: 8, borderRadius: 2, background: color,
+      }} />
+      {label}
+    </span>
   );
 }
 

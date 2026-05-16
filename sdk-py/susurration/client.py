@@ -216,6 +216,95 @@ class SusuClient:
     def list_reactions(self, signal_id: str) -> dict:
         return self._req("GET", f"/signals/{signal_id}/reactions")
 
+    # ── Phase 18.2 atomic accept / reject / close ────────────────────
+    # These replace the overloaded ``push_reaction`` for trading decisions.
+    # ``accept_signal`` writes a +1 reaction AND opens a position in one
+    # server transaction so the audit log and the position book can't
+    # diverge on a crash. ``reject_signal`` writes a -1 reaction. Paper
+    # positions are auto-closed by the daemon; ``close_position`` is for
+    # live mode (agent reports a broker fill back to susurration).
+
+    def accept_signal(
+        self,
+        signal_id: str,
+        channel_id: str,
+        token: str,
+        direction: str,
+        leverage: float,
+        entry_price: float,
+        stop_loss: float,
+        take_profit: float,
+        position_usd: float,
+        *,
+        size_factor: float | None = None,
+        mode: str = "paper",
+        broker_position_id: str | None = None,
+        peer_username: str | None = None,
+        note: str | None = None,
+        is_auto: bool = True,
+    ) -> dict:
+        """Agree with a peer's trading signal AND open the position atomically.
+
+        Server enforces broker_position_id when mode='live'. Returns
+        ``{ok, position_id, reaction_id, opened_at, mode, cost_usd,
+        allowance_after}``. Idempotent on (address, signal_id).
+        """
+        body: dict[str, Any] = {
+            "channel_id": channel_id,
+            "token": token,
+            "direction": direction,
+            "leverage": leverage,
+            "entry_price": entry_price,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "position_usd": position_usd,
+            "mode": mode,
+            "is_auto": is_auto,
+        }
+        if size_factor is not None:        body["size_factor"] = size_factor
+        if broker_position_id is not None: body["broker_position_id"] = broker_position_id
+        if peer_username is not None:      body["peer_username"] = peer_username
+        if note is not None:               body["note"] = note
+        return self._req("POST", f"/signals/{signal_id}/accept", body)
+
+    def reject_signal(
+        self,
+        signal_id: str,
+        note: str | None = None,
+        is_auto: bool = True,
+    ) -> dict:
+        """Decline a peer's trading signal. Writes a -1 reaction with note;
+        no position is opened."""
+        body: dict[str, Any] = {"is_auto": is_auto}
+        if note is not None: body["note"] = note
+        return self._req("POST", f"/signals/{signal_id}/reject", body)
+
+    def close_position(
+        self,
+        position_id: str,
+        exit_price: float,
+        exit_pnl_pct: float,
+        exit_reason: str,
+        *,
+        exit_pnl_usd: float | None = None,
+        broker_close_id: str | None = None,
+        closed_at: str | None = None,
+    ) -> dict:
+        """Close an open position. Paper positions auto-close via the daemon;
+        agents call this primarily for live positions when the broker MCP
+        reports a fill so susurration's book mirrors broker truth.
+        ``exit_reason`` ∈ TP / SL / TRAIL / TIME / MANUAL / broker_fill.
+        """
+        body: dict[str, Any] = {
+            "exit_price": exit_price,
+            "exit_pnl_pct": exit_pnl_pct,
+            "exit_reason": exit_reason,
+        }
+        if exit_pnl_usd is not None:    body["exit_pnl_usd"] = exit_pnl_usd
+        if broker_close_id is not None: body["broker_close_id"] = broker_close_id
+        if closed_at is not None:       body["closed_at"] = closed_at
+        return self._req("POST", f"/positions/{position_id}/close", body)
+
     # ── billing (non-custodial SPL Approve) ─────────────────────────
 
     def allowance(self) -> dict:

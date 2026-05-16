@@ -30,7 +30,13 @@ function OverviewBody() {
   // off this so a single click reshapes every KPI on the page.
   const [mode, setMode] = useState<ModeFilter>("all");
   const { data: snapshot, loading: snapLoading } = useBookSnapshot(mode);
-  const { data: equity } = useBookEquity(21, mode);
+  // Phase 18.2-w — for the equity curve we fetch BOTH paper and live so that
+  // mode=all can overlay them as two lines. usePoll's 60s interval keeps the
+  // double fetch cheap. Single-mode views just ignore the unused side.
+  const { data: equityPaperResp } = useBookEquity(21, "paper");
+  const { data: equityLiveResp } = useBookEquity(21, "live");
+  const equity = mode === "live" ? equityLiveResp : equityPaperResp;
+  const equitySecondary = mode === "all" ? equityLiveResp : null;
   const { data: positionsResp } = useOpenPositions(mode);
   const { data: peers } = usePeersStats(30);
   const { data: channels } = useChannelGroups();
@@ -153,11 +159,21 @@ function OverviewBody() {
 
           <section className="susu-section">
             <SectionTitle aux={
-              equity ? `${formatMoney(initial)} → ${formatMoney(balance)} · ${equity.points.length} days${mode !== "all" ? ` · ${mode}` : ""}` : "loading…"
+              !equity ? "loading…"
+              : mode === "all" ? `paper + live · ${equity.points.length} days`
+              : `${mode} only · ${equity.points.length} days`
             }>
               Equity curve
             </SectionTitle>
-            {equity && <EquityCurve points={equity.points} initialBalance={initial} />}
+            {equity && (
+              <EquityCurve
+                points={equity.points}
+                secondaryPoints={equitySecondary?.points}
+                initialBalance={initial}
+                primaryColor={mode === "live" ? "#f6c177" : "#34d399"}
+                primaryLabel={mode === "all" ? "paper" : undefined}
+              />
+            )}
           </section>
 
           <section className="susu-section">

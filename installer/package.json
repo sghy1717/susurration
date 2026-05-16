@@ -1,6 +1,6 @@
 {
   "name": "@susurration/installer",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "One-shot installer: detects your AI IDEs, wires up Susurration MCP, installs the agent daemon, and starts it. Run via npx after registering at https://susurration.xyz.",
   "type": "module",
   "bin": {
@@ -24,7 +24,13 @@
   "engines": {
     "node": ">=20"
   },
-  "keywords": ["susurration", "agent", "trading", "mcp", "installer"],
+  "keywords": [
+    "susurration",
+    "agent",
+    "trading",
+    "mcp",
+    "installer"
+  ],
   "license": "MIT",
   "repository": "github:sghy1717/susurration"
 }

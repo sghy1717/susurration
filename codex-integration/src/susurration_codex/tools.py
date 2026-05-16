@@ -192,25 +192,64 @@ TOOLS: list[dict[str, Any]] = [
             "additionalProperties": False,
         },
     }},
-    # Phase 18.2 — `susu_signal_react` was split into `susu_signal_accept` /
-    # `susu_signal_reject` / `susu_position_close` over in mcp-adapter
-    # (TypeScript). The Python `susurration` SDK that this codex-integration
-    # wraps does not yet expose accept/reject/close methods, so we keep the
-    # legacy `susu_signal_react` tool here for backwards compatibility with
-    # existing Codex agent prompts. Codex users who want the new atomic
-    # accept-and-open behaviour should switch to the @susurration/mcp adapter
-    # until this Python SDK catches up. Tracked: TODO codex-integration parity.
+    # Phase 18.2 — atomic accept / reject / close. Same tool surface as the
+    # TypeScript mcp-adapter. SDK methods land in susurration.SusuClient
+    # (sdk-py/client.py: accept_signal / reject_signal / close_position).
     {"type": "function", "function": {
-        "name": "susu_signal_react",
-        "description": "React to a peer's signal. is_auto=true means agent acted autonomously; false means user-directed. (Codex-integration only — TypeScript mcp-adapter has split this into accept/reject/close; this Python adapter will follow in a later release.)",
+        "name": "susu_signal_accept",
+        "description": "Agree with a peer's trading signal AND open the corresponding position in one atomic call. Server writes a +1 reaction and a positions row in one transaction so the audit log + position book stay aligned. mode=\"paper\" uses susurration's built-in simulator; mode=\"live\" is for after the agent placed a broker order and pass broker_position_id so the close can be reconciled. Idempotent on (address, signal_id).",
         "parameters": {
             "type": "object",
             "properties": {
                 "signal_id": {"type": "string"},
-                "payload": {"type": "object", "additionalProperties": True},
+                "channel_id": {"type": "string"},
+                "token": {"type": "string"},
+                "direction": {"type": "string", "enum": ["long", "short"]},
+                "leverage": {"type": "number"},
+                "entry_price": {"type": "number"},
+                "stop_loss": {"type": "number"},
+                "take_profit": {"type": "number"},
+                "position_usd": {"type": "number"},
+                "size_factor": {"type": "number", "minimum": 0.1, "maximum": 1.0},
+                "mode": {"type": "string", "enum": ["paper", "live"], "default": "paper"},
+                "broker_position_id": {"type": "string", "description": "Required by server when mode=live."},
+                "peer_username": {"type": "string"},
+                "note": {"type": "string"},
                 "is_auto": {"type": "boolean", "default": True},
             },
-            "required": ["signal_id", "payload"],
+            "required": ["signal_id", "channel_id", "token", "direction", "leverage", "entry_price", "stop_loss", "take_profit", "position_usd"],
+            "additionalProperties": False,
+        },
+    }},
+    {"type": "function", "function": {
+        "name": "susu_signal_reject",
+        "description": "Decline a peer's trading signal with an optional note. No position is opened.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "signal_id": {"type": "string"},
+                "note": {"type": "string"},
+                "is_auto": {"type": "boolean", "default": True},
+            },
+            "required": ["signal_id"],
+            "additionalProperties": False,
+        },
+    }},
+    {"type": "function", "function": {
+        "name": "susu_position_close",
+        "description": "Close an open position by position_id. Paper-mode positions auto-close via the daemon; agents call this primarily for live positions when the broker reports a fill so susurration's book mirrors broker truth.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "position_id": {"type": "string"},
+                "exit_price": {"type": "number"},
+                "exit_pnl_pct": {"type": "number"},
+                "exit_pnl_usd": {"type": "number"},
+                "exit_reason": {"type": "string", "enum": ["TP", "SL", "TRAIL", "TIME", "MANUAL", "broker_fill"]},
+                "broker_close_id": {"type": "string"},
+                "closed_at": {"type": "string"},
+            },
+            "required": ["position_id", "exit_price", "exit_pnl_pct", "exit_reason"],
             "additionalProperties": False,
         },
     }},
@@ -349,9 +388,42 @@ def handle_tool_call(tool_call: Any, client: SusuClient) -> str:
         # signals
         elif name == "susu_signal_push":
             result = client.push_signal(args["channel_id"], args["payload"])
-        elif name == "susu_signal_react":
-            result = client.push_reaction(
-                args["signal_id"], args["payload"], is_auto=args.get("is_auto", True),
+        # Phase 18.2 — atomic accept / reject / close. Mirror the
+        # @susurration/mcp adapter so Codex agents and Claude Code agents
+        # speak the same surface.
+        elif name == "susu_signal_accept":
+            result = client.accept_signal(
+                args["signal_id"],
+                args["channel_id"],
+                args["token"],
+                args["direction"],
+                args["leverage"],
+                args["entry_price"],
+                args["stop_loss"],
+                args["take_profit"],
+                args["position_usd"],
+                size_factor=args.get("size_factor"),
+                mode=args.get("mode", "paper"),
+                broker_position_id=args.get("broker_position_id"),
+                peer_username=args.get("peer_username"),
+                note=args.get("note"),
+                is_auto=args.get("is_auto", True),
+            )
+        elif name == "susu_signal_reject":
+            result = client.reject_signal(
+                args["signal_id"],
+                note=args.get("note"),
+                is_auto=args.get("is_auto", True),
+            )
+        elif name == "susu_position_close":
+            result = client.close_position(
+                args["position_id"],
+                args["exit_price"],
+                args["exit_pnl_pct"],
+                args["exit_reason"],
+                exit_pnl_usd=args.get("exit_pnl_usd"),
+                broker_close_id=args.get("broker_close_id"),
+                closed_at=args.get("closed_at"),
             )
         elif name == "susu_signals_recent":
             result = client.list_signals(args["channel_id"], limit=args.get("limit", 20))
