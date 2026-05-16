@@ -13,7 +13,11 @@ import { authedAddress, AuthError } from "../auth.ts";
 
 export const daemonStateRoutes = new Hono();
 
-const STALE_AFTER_SECONDS = 90; // SSE pings ~every 25s; >90s without one = stale
+// SSE feed-stream heartbeat writes last_daemon_ping_at every 60s
+// (routes/signals.ts DAEMON_PING_INTERVAL). 90s gives one missed-write
+// of margin before flipping to stale — keep these two numbers in lock-step:
+// if you raise the SSE write interval, raise this threshold too.
+const STALE_AFTER_SECONDS = 90;
 
 function authError(c: any, e: any) {
   if (e instanceof AuthError) return c.json({ error: e.reason }, e.status as 400 | 401);

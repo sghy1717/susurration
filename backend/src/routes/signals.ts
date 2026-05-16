@@ -930,7 +930,13 @@ signalRoutes.get("/signals/feed/stream", async (c) => {
     unsubs.push(unregExtender);
 
     let lastDaemonPing = Date.now();
-    const DAEMON_PING_INTERVAL = 3 * 60 * 1000; // 3 min
+    // Must stay strictly under STALE_AFTER_SECONDS (90s) in
+    // routes/daemon_state.ts — otherwise a daemon with a healthy SSE
+    // connection flickers to "stale" between heartbeat-ping writes.
+    // Daemon's own POST /identity/daemon-ping fires every 30 min; this
+    // SSE-side write is the dense complement that keeps the stale
+    // detector honest while the stream is open.
+    const DAEMON_PING_INTERVAL = 60 * 1000; // 60s — keep < 90s stale threshold
     const heartbeat = setInterval(() => {
       stream.writeSSE({ event: "ping", data: String(Date.now()) }).catch(() => {});
       if (Date.now() - lastDaemonPing > DAEMON_PING_INTERVAL) {
