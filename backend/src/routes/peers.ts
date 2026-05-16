@@ -111,12 +111,17 @@ async function aggregatePeerStats(me: string, days: number, onlyAddress: string 
       -- "Signals I accepted from this peer" = signals where I left at least
       -- one reaction. reactions has no UNIQUE(signal_id, from_address) so we
       -- must use COUNT(DISTINCT) to avoid double-counting (G review #1, #5).
+      -- Phase 18.2-w fix: peer_signals' author column is `address` (renamed
+      -- from `from_address` in the upstream CTE), so referring to
+      -- `s.from_address` here errors with "column does not exist". The hint
+      -- "perhaps you meant r.from_address" was confusing because the
+      -- reactions side is correctly aliased.
       SELECT
-        s.from_address                          AS address,
+        s.address                               AS address,
         COUNT(DISTINCT r.signal_id)::int        AS accepted_signals
       FROM peer_signals s
       JOIN reactions r ON r.signal_id = s.signal_id AND r.from_address = ${me}
-      GROUP BY s.from_address
+      GROUP BY s.address
     ),
     pos_agg AS (
       -- We match peer by username (peer_username column on positions).
