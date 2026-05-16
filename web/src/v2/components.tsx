@@ -363,6 +363,122 @@ export function UpgradeBanner({
   );
 }
 
+// ── SL-Mark-TP slider — risk distance at a glance ────────────────────────
+//
+// Phase 18.2-w (H P2) — replaces the Entry/Mark numeric pair in the
+// Overview open-positions table. The whole point of looking at a live
+// position is "how close am I to my stop / target", which a slider
+// communicates instantly. Left = SL (always, regardless of direction),
+// right = TP, dot = current mark. Entry tick sits where the position
+// was opened so the dot's drift is visible.
+//
+// For LONG: sl < entry < tp. For SHORT: sl > entry > tp. Either way we
+// flip the axis so left=SL/right=TP, which keeps "left = danger" intuition
+// consistent across both directions.
+
+export function PriceSlider({
+  direction,
+  entry,
+  sl,
+  tp,
+  mark,
+}: {
+  direction: "long" | "short";
+  entry: number;
+  sl: number;
+  tp: number;
+  mark: number | null;
+}) {
+  const isLong = direction === "long";
+  // Normalise so "left edge = SL, right edge = TP" for both directions.
+  // For LONG: sl < tp (already correct).
+  // For SHORT: sl > tp, so percent-of-range from SL = (sl - x)/(sl - tp).
+  const range = Math.abs(tp - sl);
+  if (!Number.isFinite(range) || range === 0) {
+    return <span style={{ color: "var(--susu-ink-subtle)", fontFamily: "var(--susu-mono)", fontSize: 11 }}>—</span>;
+  }
+  const pctFrom = (x: number) => {
+    const raw = isLong ? (x - sl) / (tp - sl) : (sl - x) / (sl - tp);
+    return Math.max(-0.05, Math.min(1.05, raw));  // allow slight overshoot to render OOB
+  };
+  const entryPct = pctFrom(entry);
+  const markPct = mark != null ? pctFrom(mark) : null;
+  const W = 180;
+  const H = 22;
+  const padX = 4;
+  const innerW = W - padX * 2;
+  const xAt = (p: number) => padX + p * innerW;
+
+  // Mark colour grades by distance to SL: red near 0, green near 1.
+  // 0.5 (mid) = neutral ink. Helps eye triage at-risk vs safe positions.
+  const markColor = markPct == null
+    ? "var(--susu-ink-subtle)"
+    : markPct < 0.25 ? "#f78f8f"
+    : markPct < 0.55 ? "#f6c177"
+    : "#34d399";
+
+  const fmt = (v: number) => v.toLocaleString(undefined, {
+    minimumFractionDigits: v >= 100 ? 2 : v >= 1 ? 3 : 5,
+    maximumFractionDigits: v >= 100 ? 2 : v >= 1 ? 3 : 5,
+  });
+
+  return (
+    <div
+      title={`SL ${fmt(sl)} · mark ${mark != null ? fmt(mark) : "—"} · TP ${fmt(tp)}`}
+      style={{
+        display: "inline-flex",
+        flexDirection: "column",
+        alignItems: "stretch",
+        gap: 2,
+        minWidth: W,
+      }}
+    >
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: W, height: H, display: "block" }}>
+        {/* base track */}
+        <line x1={padX} x2={W - padX} y1={H / 2} y2={H / 2}
+          stroke="rgba(255,255,255,0.10)" strokeWidth="1" />
+        {/* SL endpoint marker */}
+        <line x1={padX} x2={padX} y1={H / 2 - 5} y2={H / 2 + 5}
+          stroke="#f78f8f" strokeWidth="1.5" />
+        {/* TP endpoint marker */}
+        <line x1={W - padX} x2={W - padX} y1={H / 2 - 5} y2={H / 2 + 5}
+          stroke="#34d399" strokeWidth="1.5" />
+        {/* Entry tick — vertical hairline showing where you opened */}
+        {entryPct >= 0 && entryPct <= 1 && (
+          <line
+            x1={xAt(entryPct)} x2={xAt(entryPct)}
+            y1={H / 2 - 3} y2={H / 2 + 3}
+            stroke="rgba(255,255,255,0.32)" strokeWidth="1"
+          />
+        )}
+        {/* Mark dot */}
+        {markPct != null && (
+          <>
+            <circle cx={xAt(markPct)} cy={H / 2} r="4" fill={markColor} opacity="0.32">
+              <animate attributeName="r" values="4;7;4" dur="2.4s" repeatCount="indefinite" />
+              <animate attributeName="opacity" values="0.32;0;0.32" dur="2.4s" repeatCount="indefinite" />
+            </circle>
+            <circle cx={xAt(markPct)} cy={H / 2} r="2.5" fill={markColor} />
+          </>
+        )}
+      </svg>
+      <div style={{
+        display: "flex",
+        justifyContent: "space-between",
+        fontFamily: "var(--susu-mono)",
+        fontSize: 9,
+        color: "var(--susu-ink-subtle)",
+        lineHeight: 1,
+        fontVariantNumeric: "tabular-nums",
+      }}>
+        <span>sl {fmt(sl)}</span>
+        <span style={{ color: markColor }}>{mark != null ? `mark ${fmt(mark)}` : "—"}</span>
+        <span>tp {fmt(tp)}</span>
+      </div>
+    </div>
+  );
+}
+
 // ── Mode badge — tiny PAPER / LIVE pill rendered next to a position row ──
 
 export function ModeBadge({ mode }: { mode: "paper" | "live" }) {
@@ -385,6 +501,258 @@ export function ModeBadge({ mode }: { mode: "paper" | "live" }) {
     >
       {mode}
     </span>
+  );
+}
+
+// ── Structured event card (Phase 18.2-w · H P1) ──────────────────────────
+//
+// Replaces the prior 1-line "REACT · @demo → #channel" headline rows with
+// a richer card per event: timestamp + status tag + headline on top, an
+// embedded mono key:value block beneath that exposes the actual payload
+// fields (token / entry / sl·tp / conv / note for signals; realized PnL +
+// hold time for closes; value + size for reactions). This is what makes
+// the feed feel like agent protocol traffic instead of a SaaS log.
+//
+// Colour conventions match the existing susu-feed-payload palette:
+//   key   → ink-subtle gray
+//   token → susu-neg (red/pink, eye anchor)
+//   number → susu-warn (yellow)
+//   string → susu-pos (green)
+//
+// `compact` mode renders only the headline (used in narrow panels).
+
+type AnyEvent = {
+  kind?: string;
+  signal_id?: string;
+  reaction_id?: string;
+  channel_id?: string;
+  channel_name?: string | null;
+  is_group?: boolean;
+  from_address: string;
+  from_username?: string | null;
+  payload?: any;
+  created_at: string;
+};
+
+function fmtNumber(v: any): string {
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n)) return String(v);
+  if (Math.abs(n) >= 1000) return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  if (Math.abs(n) >= 1)    return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
+  return n.toLocaleString(undefined, { maximumFractionDigits: 6 });
+}
+
+function reactionValueOf(payload: any): "plus" | "minus" | null {
+  const v = payload?.value;
+  if (v === 1 || v === "+1" || v === "1") return "plus";
+  if (v === -1 || v === "-1") return "minus";
+  return null;
+}
+
+export function StructuredEventCard({
+  ev,
+  compact = false,
+}: {
+  ev: AnyEvent;
+  compact?: boolean;
+}) {
+  const time = new Date(ev.created_at);
+  const isSignal = ev.kind === "signal";
+  const isReaction = ev.kind === "reaction";
+  const isClose = ev.kind === "close" || ev.kind === "paper_close" || ev.kind === "close_paper";
+  const side = ev.payload?.direction ?? ev.payload?.side;
+  const token = ev.payload?.token;
+  const handle = ev.from_username ? `@${ev.from_username}` : `${ev.from_address.slice(0, 6)}…`;
+  const channel = ev.channel_name ?? "DM";
+  const channelLabel = ev.is_group ? `#${channel}` : channel;
+  const reactPol = isReaction ? reactionValueOf(ev.payload) : null;
+
+  // Tag colour
+  let tag: React.ReactNode = null;
+  if (isSignal) {
+    tag = <Tag kind={side === "short" ? "short" : "long"}>SIGNAL · {(side ?? "").toUpperCase()}</Tag>;
+  } else if (isClose) {
+    const pnl = ev.payload?.exit_pnl_usd;
+    tag = <Tag kind={pnl != null && pnl >= 0 ? "long" : "short"}>CLOSED · {ev.payload?.exit_reason ?? "—"}</Tag>;
+  } else if (isReaction) {
+    tag = <Tag kind={reactPol === "plus" ? "long" : reactPol === "minus" ? "short" : "neutral"}>
+      REACT · {reactPol === "plus" ? "+1" : reactPol === "minus" ? "-1" : "?"}
+    </Tag>;
+  }
+
+  // Right-aligned summary on headline (size / pnl)
+  let summary: React.ReactNode = null;
+  if (isSignal && ev.payload?.entry_price != null) {
+    const usd = ev.payload?.position_usd;
+    summary = (
+      <span style={{ fontFamily: "var(--susu-mono)", fontSize: 11, color: "var(--susu-ink-subtle)" }}>
+        {usd != null ? `opened $${fmtNumber(usd)} @ ` : "@ "}
+        <span style={{ color: "var(--susu-warn)" }}>{fmtNumber(ev.payload.entry_price)}</span>
+      </span>
+    );
+  } else if (isClose && ev.payload?.exit_pnl_usd != null) {
+    const pnl = Number(ev.payload.exit_pnl_usd);
+    summary = (
+      <span style={{
+        fontFamily: "var(--susu-mono)", fontSize: 13, fontWeight: 500,
+        color: pnl >= 0 ? "var(--susu-pos)" : "var(--susu-neg)",
+        fontVariantNumeric: "tabular-nums",
+      }}>
+        {pnl >= 0 ? "+" : ""}${fmtNumber(pnl)}
+      </span>
+    );
+  }
+
+  // Headline middle copy
+  let headlineCopy: React.ReactNode = null;
+  if (isSignal && token) {
+    headlineCopy = (
+      <>
+        <span className="susu-feed-handle">{handle}</span>{" "}
+        <span style={{ color: "var(--susu-ink-subtle)" }}>pushed</span>{" "}
+        <span style={{ color: "var(--susu-neg)" }}>{token}</span>{" "}
+        <span style={{ color: "var(--susu-ink-muted)" }}>{(side ?? "").toUpperCase()}</span>{" "}
+        <span style={{ color: "var(--susu-ink-subtle)" }}>via</span>{" "}
+        <span className="susu-mono" style={{ color: "var(--susu-ink-muted)" }}>{channelLabel}</span>
+      </>
+    );
+  } else if (isClose && token) {
+    headlineCopy = (
+      <>
+        <span style={{ color: "var(--susu-neg)" }}>{token}</span>{" "}
+        <span style={{ color: "var(--susu-ink-muted)" }}>{(side ?? "").toUpperCase()}</span>{" "}
+        <span style={{ color: "var(--susu-ink-subtle)" }}>closed at</span>{" "}
+        <span style={{ color: "var(--susu-warn)" }}>${fmtNumber(ev.payload?.exit_price)}</span>{" "}
+        <span style={{ color: "var(--susu-ink-subtle)" }}>· src</span>{" "}
+        <span className="susu-feed-handle">{handle}</span>
+      </>
+    );
+  } else if (isReaction) {
+    headlineCopy = (
+      <>
+        <span className="susu-feed-handle">{handle}</span>{" "}
+        <span style={{ color: "var(--susu-ink-subtle)" }}>reacted</span>{" "}
+        {ev.payload?.note && (
+          <span style={{ color: "var(--susu-ink-muted)" }}>· "{String(ev.payload.note).slice(0, 80)}"</span>
+        )}
+      </>
+    );
+  } else {
+    headlineCopy = (
+      <>
+        <span className="susu-feed-handle">{handle}</span>{" "}
+        <span style={{ color: "var(--susu-ink-subtle)" }}>→ {channelLabel}</span>
+      </>
+    );
+  }
+
+  return (
+    <div style={{
+      padding: "var(--susu-s-3) var(--susu-s-4)",
+      borderBottom: "1px solid var(--susu-hairline)",
+      display: "grid",
+      gridTemplateColumns: "72px 1fr auto",
+      gap: "var(--susu-s-3)",
+      alignItems: "start",
+    }}>
+      <div style={{
+        fontFamily: "var(--susu-mono)", fontSize: 11,
+        color: "var(--susu-ink-subtle)",
+        paddingTop: 3,
+        fontVariantNumeric: "tabular-nums",
+      }}>
+        {time.toISOString().slice(11, 19)}
+      </div>
+      <div style={{ minWidth: 0 }}>
+        <div style={{
+          display: "flex", alignItems: "center", flexWrap: "wrap",
+          gap: "var(--susu-s-2)",
+          fontFamily: "var(--susu-mono)", fontSize: 12,
+          lineHeight: 1.4,
+        }}>
+          {tag}
+          {headlineCopy}
+        </div>
+        {!compact && <EventDetails ev={ev} />}
+      </div>
+      <div style={{ paddingTop: 4 }}>{summary}</div>
+    </div>
+  );
+}
+
+function EventDetails({ ev }: { ev: AnyEvent }) {
+  const isSignal = ev.kind === "signal";
+  const isClose = ev.kind === "close" || ev.kind === "paper_close" || ev.kind === "close_paper";
+  const isReaction = ev.kind === "reaction";
+  const p = ev.payload ?? {};
+
+  type Row = { k: string; v: React.ReactNode };
+  const rows: Row[] = [];
+
+  if (isSignal) {
+    if (p.token != null)        rows.push({ k: "asset", v: <span style={{ color: "var(--susu-neg)" }}>{p.token}</span> });
+    if (p.entry_price != null)  rows.push({ k: "entry", v: <span style={{ color: "var(--susu-warn)" }}>{fmtNumber(p.entry_price)}</span> });
+    if (p.stop_loss != null || p.take_profit != null) {
+      rows.push({
+        k: "sl·tp",
+        v: <span style={{ color: "var(--susu-warn)" }}>
+          {p.stop_loss != null ? fmtNumber(p.stop_loss) : "—"} · {p.take_profit != null ? fmtNumber(p.take_profit) : "—"}
+        </span>,
+      });
+    }
+    if (p.confidence != null) {
+      const conf = Number(p.confidence);
+      rows.push({
+        k: "conv",
+        v: <>
+          <span style={{ color: "var(--susu-warn)" }}>{conf.toFixed(2)}</span>{" "}
+          <span style={{ color: conf >= 0.7 ? "var(--susu-pos)" : "var(--susu-ink-subtle)" }}>
+            {conf >= 0.7 ? "pass" : "below"}
+          </span>
+        </>,
+      });
+    }
+    if (p.reason) {
+      rows.push({ k: "note", v: <span style={{ color: "var(--susu-pos)" }}>"{String(p.reason).slice(0, 160)}"</span> });
+    }
+  } else if (isClose) {
+    const pnlUsd = p.exit_pnl_usd != null ? Number(p.exit_pnl_usd) : null;
+    const pnlPct = p.exit_pnl_pct != null ? Number(p.exit_pnl_pct) : null;
+    if (pnlUsd != null || pnlPct != null) {
+      rows.push({
+        k: "realized",
+        v: <span style={{
+          color: (pnlUsd ?? pnlPct ?? 0) >= 0 ? "var(--susu-pos)" : "var(--susu-neg)",
+        }}>
+          {pnlUsd != null && `${pnlUsd >= 0 ? "+" : ""}$${fmtNumber(pnlUsd)}`}
+          {pnlUsd != null && pnlPct != null && " · "}
+          {pnlPct != null && `${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%`}
+        </span>,
+      });
+    }
+    if (p.exit_price != null) rows.push({ k: "exit", v: <span style={{ color: "var(--susu-warn)" }}>{fmtNumber(p.exit_price)}</span> });
+  } else if (isReaction) {
+    if (p.size_factor != null) rows.push({ k: "size", v: <span style={{ color: "var(--susu-warn)" }}>{Number(p.size_factor).toFixed(2)}</span> });
+    if (p.mode)               rows.push({ k: "mode", v: <span style={{ color: "var(--susu-pos)" }}>{String(p.mode)}</span> });
+    if (p.note)               rows.push({ k: "note", v: <span style={{ color: "var(--susu-pos)" }}>"{String(p.note).slice(0, 160)}"</span> });
+  }
+
+  if (rows.length === 0) return null;
+  return (
+    <div className="susu-feed-payload" style={{
+      marginTop: "var(--susu-s-2)",
+      padding: "var(--susu-s-3)",
+      borderRadius: 6,
+      background: "var(--susu-surface-1)",
+      border: "1px solid var(--susu-hairline)",
+      lineHeight: 1.7,
+    }}>
+      {rows.map(({ k, v }) => (
+        <div key={k}>
+          <span className="k" style={{ display: "inline-block", minWidth: 64 }}>{k}:</span> {v}
+        </div>
+      ))}
+    </div>
   );
 }
 

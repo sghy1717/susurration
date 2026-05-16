@@ -9,11 +9,12 @@ import {
   useBookSnapshot, useBookEquity, useOpenPositions, useDaemonState,
   usePeersStats, useChannelGroups, useSignalFeed, usePrices,
   pnlOf, durationStr, formatMoney, formatPnl, formatPercent,
-  type Position, type FeedItem, type ModeFilter,
+  type Position, type ModeFilter,
 } from "./hooks";
 import {
   Eyebrow, SectionTitle, Tag, TickValue, KpiStrip, Avatar,
-  EquityCurve, ReadOnlyFootnote, ModeFilterPill, ModeBadge, formatClock,
+  EquityCurve, ReadOnlyFootnote, ModeFilterPill, ModeBadge, PriceSlider,
+  StructuredEventCard, formatClock,
 } from "./components";
 
 export function OverviewPage() {
@@ -166,8 +167,7 @@ function OverviewBody() {
                       <th>Mode</th>
                       <th>Side</th>
                       <th>From</th>
-                      <th className="num">Entry</th>
-                      <th className="num">Mark</th>
+                      <th>SL · Mark · TP</th>
                       <th className="num">PnL</th>
                       <th className="num">Duration</th>
                     </tr>
@@ -199,15 +199,29 @@ function OverviewBody() {
                 primaryLabel={mode === "all" ? "paper" : undefined}
               />
             )}
+            {/* Phase 18.2-w (H P3b) — one-sentence prose summary so the
+                page answers "what happened?" without anyone reading the
+                chart. Generated from snapshot, not hand-written. */}
+            {snapshot && <EquityNarrative snapshot={snapshot} />}
           </section>
 
           <section className="susu-section">
             <SectionTitle aux={<Link to="/v2/feed" className="susu-btn susu-btn-ghost susu-btn-sm">View full feed →</Link>}>
               Recent activity
             </SectionTitle>
-            <div className="susu-panel">
+            {/* Phase 18.2-w (H P1) — Recent activity uses StructuredEventCard:
+                full mono key:value block per event, colour-coded so the
+                payload is readable at a glance. Compact mode would skip
+                the block; on Overview we want the depth, just bounded
+                to 4 events. Full history at /v2/feed. */}
+            <div className="susu-panel" style={{ padding: 0 }}>
               {feed?.signals.length ? (
-                feed.signals.slice(0, 6).map((ev, i) => <RecentRow key={ev.signal_id ?? ev.reaction_id ?? i} ev={ev} />)
+                feed.signals.slice(0, 4).map((ev, i) => (
+                  <StructuredEventCard
+                    key={ev.signal_id ?? ev.reaction_id ?? i}
+                    ev={ev as any}
+                  />
+                ))
               ) : (
                 <div className="susu-empty">No recent activity. Once your daemon sees signals they appear here.</div>
               )}
@@ -227,6 +241,52 @@ function OverviewBody() {
   );
 }
 
+// Phase 18.2-w (H P3b) — one-sentence equity summary. Plain English so a
+// human glancing at the page knows the shape of the period without reading
+// the chart. We deliberately keep it factual and short; no editorializing
+// like "great week!" — the data should speak.
+function EquityNarrative({ snapshot }: { snapshot: any }) {
+  const { wins, losses, break_even, closed_count, realized_pnl_total, initial_balance_usd } = snapshot;
+  if (!closed_count) {
+    return (
+      <p style={{
+        marginTop: "var(--susu-s-3)",
+        fontFamily: "var(--susu-mono)", fontSize: 12, lineHeight: 1.6,
+        color: "var(--susu-ink-subtle)",
+        maxWidth: "60ch",
+      }}>
+        No closed trades in this window yet. Once your agent's first trip
+        completes, this line will tell you how it went.
+      </p>
+    );
+  }
+  const pct = (realized_pnl_total / initial_balance_usd) * 100;
+  const isUp = realized_pnl_total >= 0;
+  const winRate = Math.round((wins / closed_count) * 100);
+  const beClause = break_even > 0 ? `, ${break_even} break-even` : "";
+  const trailing = isUp
+    ? (winRate >= 60 ? "The slow drift continues." : "Mixed run — losses outpace wins on count but the dollar tape is up.")
+    : (winRate >= 50 ? "Wins out-number losses but the dollar tape is red — losers ran bigger than winners." : "Rough stretch. Worth pausing to re-check the conv threshold.");
+  return (
+    <p style={{
+      marginTop: "var(--susu-s-3)",
+      fontFamily: "var(--susu-mono)", fontSize: 12, lineHeight: 1.6,
+      color: "var(--susu-ink-subtle)",
+      maxWidth: "60ch",
+    }}>
+      <strong style={{ color: "var(--susu-ink)", fontWeight: 500 }}>
+        {wins} {wins === 1 ? "win" : "wins"}, {losses} {losses === 1 ? "loss" : "losses"}{beClause}
+      </strong>{" "}
+      across {closed_count} closed{" "}
+      {closed_count === 1 ? "trade" : "trades"} ·{" "}
+      <span style={{ color: isUp ? "var(--susu-pos)" : "var(--susu-neg)" }}>
+        {isUp ? "+" : ""}{pct.toFixed(2)}%
+      </span>{" "}
+      vs initial. {trailing}
+    </p>
+  );
+}
+
 function PositionRow({ p, mark, now }: { p: Position; mark: number | null; now: number }) {
   const pnl = mark != null ? pnlOf(p, mark) : null;
   // Phase 18.2-w fix: pnlOf already factors direction into its sign — a
@@ -234,12 +294,6 @@ function PositionRow({ p, mark, now }: { p: Position; mark: number | null; now: 
   // by dirSign again in the color check, which flipped the colour on
   // every short. Drop the extra factor: green when pnl is genuinely
   // positive, red when negative.
-  // Price decimal places auto-fit so sub-$1 assets (ARPAUSDT 0.012) don't
-  // round to "0.01" — pick precision per magnitude.
-  const priceFmt = (v: number) => v.toLocaleString(undefined, {
-    minimumFractionDigits: v >= 100 ? 2 : v >= 1 ? 3 : 5,
-    maximumFractionDigits: v >= 100 ? 2 : v >= 1 ? 3 : 5,
-  });
   return (
     <tr>
       <td><strong className="susu-mono" style={{ color: "var(--susu-ink)" }}>{p.token}</strong></td>
@@ -251,10 +305,18 @@ function PositionRow({ p, mark, now }: { p: Position; mark: number | null; now: 
           <span className="susu-mono">{p.peer_username ? `@${p.peer_username}` : "—"}</span>
         </div>
       </td>
-      <td className="num">{priceFmt(p.entry_price)}</td>
-      <td className="num">{mark != null ? (
-        <TickValue value={mark} format={v => priceFmt(Number(v))} />
-      ) : "—"}</td>
+      <td>
+        {/* Phase 18.2-w (H P2) — slider replaces the Entry+Mark column pair.
+            "Distance to SL vs distance to TP" is the question users actually
+            ask while scanning; a horizontal bar answers it without arithmetic. */}
+        <PriceSlider
+          direction={p.direction}
+          entry={p.entry_price}
+          sl={p.stop_loss}
+          tp={p.take_profit}
+          mark={mark}
+        />
+      </td>
       <td className="num" style={{ color: pnl == null ? "var(--susu-ink-subtle)" : pnl >= 0 ? "var(--susu-pos)" : "var(--susu-neg)" }}>
         {pnl == null ? "—" : (
           <TickValue value={pnl} format={v => formatPnl(typeof v === "number" ? v : Number(v))} />
@@ -262,30 +324,6 @@ function PositionRow({ p, mark, now }: { p: Position; mark: number | null; now: 
       </td>
       <td className="num">{durationStr(p.opened_at, now)}</td>
     </tr>
-  );
-}
-
-function RecentRow({ ev }: { ev: FeedItem }) {
-  const isReact = ev.kind === "reaction";
-  const isClose = ev.kind === "close";
-  const isSignal = ev.kind === "signal";
-  const side = ev.payload?.side ?? ev.payload?.direction;
-  const handle = ev.from_username ? `@${ev.from_username}` : `${ev.from_address.slice(0, 6)}…`;
-  const channel = ev.channel_name ?? "DM";
-  return (
-    <div className="susu-feed-row" style={{ gridTemplateColumns: "88px 1fr auto", borderBottom: "1px solid var(--susu-hairline)" }}>
-      <div className="susu-feed-time">{formatClock(ev.created_at)}</div>
-      <div className="susu-feed-body">
-        <div className="susu-feed-headline">
-          {isSignal && <Tag kind={side === "short" ? "short" : "long"}>SIGNAL · {(side ?? "").toUpperCase()}</Tag>}
-          {isClose && <Tag kind={ev.payload?.exit_pnl_usd >= 0 ? "long" : "short"}>CLOSED · {ev.payload?.exit_reason ?? "—"}</Tag>}
-          {isReact && (() => { const v = ev.payload?.value; const isPlus = v === 1 || v === "+1" || v === "1"; const isMinus = v === -1 || v === "-1"; return <Tag kind="neutral">REACT · {isPlus ? "+1" : isMinus ? "-1" : "?"}</Tag>; })()}
-          <span className="susu-feed-handle">{handle}</span>
-          <span style={{ color: "var(--susu-ink-subtle)" }}>→</span>
-          <span className="susu-mono" style={{ color: "var(--susu-ink-muted)" }}>{ev.is_group ? `#${channel}` : channel}</span>
-        </div>
-      </div>
-    </div>
   );
 }
 
