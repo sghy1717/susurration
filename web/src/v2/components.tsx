@@ -187,21 +187,21 @@ export function ModeFilterPill({
     { v: "paper", label: "PAPER", title: "Susurration's built-in simulator" },
     { v: "live", label: "LIVE", title: "Real broker trades reported by the agent" },
   ];
-  const padY = size === "sm" ? 4 : 6;
-  const padX = size === "sm" ? 8 : 12;
+  // Phase 18.2-w UX pass — mode toggle now uses the same outlined-pill
+  // primitive as the 21d / 7d / 24h time-range row next to it (active =
+  // .susu-btn, inactive = .susu-btn-ghost). Previously the active state
+  // was a flat accent fill, which read as a different control type and
+  // clashed visually with the neighbouring buttons.
+  const sm = size === "sm";
   return (
     <div
       role="tablist"
       aria-label="Book mode filter"
       style={{
         display: "inline-flex",
-        gap: 0,
-        padding: 2,
-        border: "1px solid var(--susu-border-soft)",
-        borderRadius: 999,
-        background: "var(--susu-surface-1)",
+        gap: 2,
         fontFamily: "var(--susu-mono)",
-        fontSize: size === "sm" ? 10 : 11,
+        fontSize: sm ? 10 : 11,
         letterSpacing: "0.04em",
         userSelect: "none",
       }}
@@ -215,17 +215,12 @@ export function ModeFilterPill({
             aria-selected={active}
             title={title}
             onClick={() => onChange(v)}
+            className={`susu-btn${active ? "" : " susu-btn-ghost"}${sm ? " susu-btn-sm" : ""}`}
             style={{
-              border: "none",
-              background: active ? "var(--susu-accent)" : "transparent",
-              color: active ? "var(--susu-bg)" : "var(--susu-ink-subtle)",
-              padding: `${padY}px ${padX}px`,
               borderRadius: 999,
-              fontFamily: "inherit",
-              fontSize: "inherit",
-              letterSpacing: "inherit",
-              cursor: "pointer",
-              transition: "background-color 160ms ease, color 160ms ease",
+              fontFamily: "var(--susu-mono)",
+              letterSpacing: "0.04em",
+              fontWeight: active ? 600 : 500,
             }}
           >
             {label}

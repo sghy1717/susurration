@@ -130,11 +130,24 @@ function OverviewBody() {
             <SectionTitle aux={`${positions.length} open${mode !== "all" ? ` · ${mode}` : ""}${positions[0]?.opened_at ? ` · marked at ${formatClock(new Date().toISOString())} UTC` : ""}`}>
               Open positions
             </SectionTitle>
-            <div className="susu-panel">
+            {/* Phase 18.2-w UX pass — fixed min-height so toggling
+                ALL/PAPER/LIVE (or any change that shrinks the row count
+                to 0) doesn't yank the equity curve + activity panels up
+                the page. Empty state centers vertically inside the
+                reserved space. */}
+            <div className="susu-panel" style={{ minHeight: 320, position: "relative" }}>
               {positions.length === 0 ? (
-                <div className="susu-empty">No open positions — your daemon is watching.</div>
+                <div
+                  className="susu-empty"
+                  style={{
+                    position: "absolute", inset: 0,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                  }}
+                >
+                  No open positions — your daemon is watching.
+                </div>
               ) : (
-                <table className="susu-table">
+                <table className="susu-table" style={{ fontVariantNumeric: "tabular-nums" }}>
                   <thead>
                     <tr>
                       <th>Asset</th>
