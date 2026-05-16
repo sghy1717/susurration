@@ -216,8 +216,18 @@ function OverviewBody() {
 }
 
 function PositionRow({ p, mark, now }: { p: Position; mark: number | null; now: number }) {
-  const dirSign = p.direction === "long" ? 1 : -1;
   const pnl = mark != null ? pnlOf(p, mark) : null;
+  // Phase 18.2-w fix: pnlOf already factors direction into its sign — a
+  // winning short returns a positive pnl. Previously we multiplied pnl
+  // by dirSign again in the color check, which flipped the colour on
+  // every short. Drop the extra factor: green when pnl is genuinely
+  // positive, red when negative.
+  // Price decimal places auto-fit so sub-$1 assets (ARPAUSDT 0.012) don't
+  // round to "0.01" — pick precision per magnitude.
+  const priceFmt = (v: number) => v.toLocaleString(undefined, {
+    minimumFractionDigits: v >= 100 ? 2 : v >= 1 ? 3 : 5,
+    maximumFractionDigits: v >= 100 ? 2 : v >= 1 ? 3 : 5,
+  });
   return (
     <tr>
       <td><strong className="susu-mono" style={{ color: "var(--susu-ink)" }}>{p.token}</strong></td>
@@ -229,11 +239,11 @@ function PositionRow({ p, mark, now }: { p: Position; mark: number | null; now: 
           <span className="susu-mono">{p.peer_username ? `@${p.peer_username}` : "—"}</span>
         </div>
       </td>
-      <td className="num">{p.entry_price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+      <td className="num">{priceFmt(p.entry_price)}</td>
       <td className="num">{mark != null ? (
-        <TickValue value={mark} format={v => Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} />
+        <TickValue value={mark} format={v => priceFmt(Number(v))} />
       ) : "—"}</td>
-      <td className="num" style={{ color: pnl == null ? "var(--susu-ink-subtle)" : pnl * dirSign >= 0 ? "var(--susu-pos)" : "var(--susu-neg)" }}>
+      <td className="num" style={{ color: pnl == null ? "var(--susu-ink-subtle)" : pnl >= 0 ? "var(--susu-pos)" : "var(--susu-neg)" }}>
         {pnl == null ? "—" : (
           <TickValue value={pnl} format={v => formatPnl(typeof v === "number" ? v : Number(v))} />
         )}
@@ -257,7 +267,7 @@ function RecentRow({ ev }: { ev: FeedItem }) {
         <div className="susu-feed-headline">
           {isSignal && <Tag kind={side === "short" ? "short" : "long"}>SIGNAL · {(side ?? "").toUpperCase()}</Tag>}
           {isClose && <Tag kind={ev.payload?.exit_pnl_usd >= 0 ? "long" : "short"}>CLOSED · {ev.payload?.exit_reason ?? "—"}</Tag>}
-          {isReact && <Tag kind="neutral">REACT · {ev.payload?.value === 1 ? "+1" : ev.payload?.value === -1 ? "-1" : "?"}</Tag>}
+          {isReact && (() => { const v = ev.payload?.value; const isPlus = v === 1 || v === "+1" || v === "1"; const isMinus = v === -1 || v === "-1"; return <Tag kind="neutral">REACT · {isPlus ? "+1" : isMinus ? "-1" : "?"}</Tag>; })()}
           <span className="susu-feed-handle">{handle}</span>
           <span style={{ color: "var(--susu-ink-subtle)" }}>→</span>
           <span className="susu-mono" style={{ color: "var(--susu-ink-muted)" }}>{ev.is_group ? `#${channel}` : channel}</span>

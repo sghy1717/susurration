@@ -1,6 +1,6 @@
 // Signal feed page — full event stream with SSE live updates.
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { Shell } from "./Shell";
 import {
   useSignalFeed, useFeedSSE, useBookSnapshot,
@@ -13,8 +13,23 @@ import {
 
 type Filter = "all" | "signals" | "react_plus" | "react_minus" | "opened" | "closed";
 
+// Server stores reaction value as the string "+1" or "-1" (set by mcp-adapter
+// + cli). v2 originally compared against number 1 / -1 which always returned
+// false → counters frozen at 0 even when events poured in. Normalise here.
+function reactionPolarity(payload: any): "plus" | "minus" | null {
+  const v = payload?.value;
+  if (v === 1 || v === "+1" || v === "1") return "plus";
+  if (v === -1 || v === "-1") return "minus";
+  return null;
+}
+
 export function FeedPage() {
-  const { data: feed, loading } = useSignalFeed(200);
+  // Phase 18.2-w perf — bootstrap with 50 rows for fast first paint
+  // (~80ms server + small parse), then on-demand "Load older" pulls
+  // a deeper window. Previously 200 rows = 276KB JSON + render =
+  // sluggish landing from /v2/overview "View full feed →".
+  const [limit, setLimit] = useState(50);
+  const { data: feed, loading } = useSignalFeed(limit);
   const sse = useFeedSSE(feed?.signals ?? []);
   const { data: snapshot } = useBookSnapshot();
 
@@ -29,8 +44,8 @@ export function FeedPage() {
   const counts = useMemo(() => ({
     all: recent24h.length,
     signals: recent24h.filter(e => e.kind === "signal").length,
-    react_plus: recent24h.filter(e => e.kind === "reaction" && e.payload?.value === 1).length,
-    react_minus: recent24h.filter(e => e.kind === "reaction" && e.payload?.value === -1).length,
+    react_plus: recent24h.filter(e => e.kind === "reaction" && reactionPolarity(e.payload) === "plus").length,
+    react_minus: recent24h.filter(e => e.kind === "reaction" && reactionPolarity(e.payload) === "minus").length,
     opened: recent24h.filter(e => e.kind === "open" || e.kind === "open_paper").length,
     closed: recent24h.filter(e => e.kind === "close" || e.kind === "close_paper").length,
   }), [recent24h]);
@@ -38,8 +53,8 @@ export function FeedPage() {
   const filtered = useMemo(() => {
     switch (filter) {
       case "signals":     return events.filter(e => e.kind === "signal");
-      case "react_plus":  return events.filter(e => e.kind === "reaction" && e.payload?.value === 1);
-      case "react_minus": return events.filter(e => e.kind === "reaction" && e.payload?.value === -1);
+      case "react_plus":  return events.filter(e => e.kind === "reaction" && reactionPolarity(e.payload) === "plus");
+      case "react_minus": return events.filter(e => e.kind === "reaction" && reactionPolarity(e.payload) === "minus");
       case "opened":      return events.filter(e => e.kind === "open" || e.kind === "open_paper");
       case "closed":      return events.filter(e => e.kind === "close" || e.kind === "close_paper");
       default:            return events;
@@ -100,11 +115,31 @@ export function FeedPage() {
               <span style={{ fontFamily: "var(--susu-mono)", fontSize: 11, color: "var(--susu-ink-subtle)" }}>last 24h</span>
             </div>
             {filtered.length === 0 ? (
-              <div className="susu-empty">{loading ? "loading…" : "No events match this filter."}</div>
+              loading ? (
+                // Skeleton rows so the user sees structure during the
+                // first-paint fetch instead of a single "loading…" line.
+                // Subsequent polls don't flip loading back to true so
+                // these only appear on the very first load.
+                <>{Array.from({ length: 6 }).map((_, i) => <FeedSkeletonRow key={i} />)}</>
+              ) : (
+                <div className="susu-empty">No events match this filter.</div>
+              )
             ) : (
-              filtered.slice(0, 100).map((ev, i) => (
-                <FeedRow key={(ev.signal_id ?? ev.reaction_id ?? "") + ":" + ev.created_at + ":" + i} ev={ev} />
-              ))
+              <>
+                {filtered.slice(0, 100).map((ev, i) => (
+                  <FeedRow key={(ev.signal_id ?? ev.reaction_id ?? "") + ":" + ev.created_at + ":" + i} ev={ev} />
+                ))}
+                {filter === "all" && limit < 200 && feed && feed.signals.length >= limit && (
+                  <div style={{ display: "flex", justifyContent: "center", padding: "var(--susu-s-4)" }}>
+                    <button
+                      className="susu-btn susu-btn-ghost"
+                      onClick={() => setLimit(200)}
+                    >
+                      Load older events
+                    </button>
+                  </div>
+                )}
+              </>
             )}
           </div>
         </div>
@@ -143,7 +178,7 @@ function FeedRow({ ev }: { ev: FeedItem }) {
   const tag = isSignal ? <Tag kind={side === "short" ? "short" : "long"}>SIGNAL · {(side ?? "?").toUpperCase()}</Tag>
             : isClose ? <Tag kind={ev.payload?.exit_pnl_usd >= 0 ? "long" : "short"}>CLOSED · {ev.payload?.exit_reason ?? "—"}</Tag>
             : isOpen ? <Tag kind="neutral">OPENED</Tag>
-            : isReaction ? <Tag kind={ev.payload?.value === 1 ? "long" : ev.payload?.value === -1 ? "short" : "neutral"}>REACT · {ev.payload?.value === 1 ? "+1" : ev.payload?.value === -1 ? "-1" : "?"}</Tag>
+            : isReaction ? (() => { const pol = reactionPolarity(ev.payload); return <Tag kind={pol === "plus" ? "long" : pol === "minus" ? "short" : "neutral"}>REACT · {pol === "plus" ? "+1" : pol === "minus" ? "-1" : "?"}</Tag>; })()
             : <Tag kind="neutral">{ev.kind}</Tag>;
 
   return (
@@ -173,6 +208,42 @@ function FeedRow({ ev }: { ev: FeedItem }) {
   );
 }
 
+// Phase 18.2-w perf — skeleton rows shown while the very first
+// /signals/feed bootstrap is in flight. Once that returns, all subsequent
+// polls keep the previous data on screen, so this only appears on landing.
+function FeedSkeletonRow() {
+  return (
+    <div
+      className="susu-feed-row"
+      style={{
+        gridTemplateColumns: "120px 1fr",
+        borderBottom: "1px solid var(--susu-hairline)",
+        padding: "var(--susu-s-3) var(--susu-s-4)",
+      }}
+      aria-hidden
+    >
+      <div style={{
+        height: 14, width: 80, borderRadius: 4,
+        background: "var(--susu-surface-2)",
+        opacity: 0.55,
+      }} className="susu-tick-pulse" />
+      <div>
+        <div style={{
+          height: 14, width: "62%", borderRadius: 4,
+          background: "var(--susu-surface-2)",
+          opacity: 0.45,
+          marginBottom: 8,
+        }} className="susu-tick-pulse" />
+        <div style={{
+          height: 12, width: "38%", borderRadius: 4,
+          background: "var(--susu-surface-2)",
+          opacity: 0.35,
+        }} className="susu-tick-pulse" />
+      </div>
+    </div>
+  );
+}
+
 function Payload({ payload }: { payload: any }) {
   if (payload == null) return null;
   // Render top-level k/v pairs as a mono code block.
@@ -183,15 +254,56 @@ function Payload({ payload }: { payload: any }) {
     entries = [["payload", payload]];
   }
   if (entries.length === 0) return null;
+  // Phase 18.2-w fix: long metadata values (JSON-stringified raw_signal
+  // blobs, multi-sentence reasons) used to overflow horizontally and force
+  // a scrollbar across the whole payload. Replaced with word-wrap +
+  // collapsible "Show more" for any string >120 chars — fits the card
+  // without horizontal scroll, lets curious users expand on demand.
   return (
-    <div className="susu-feed-payload" style={{ maxHeight: 180, overflowY: "auto" }}>
+    <div
+      className="susu-feed-payload"
+      style={{
+        maxHeight: 240,
+        overflowY: "auto",
+        overflowX: "hidden",
+      }}
+    >
       {entries.map(([k, v]) => (
-        <div key={k}>
-          <span className="k">{k}:</span> <span className={typeof v === "number" ? "n" : "s"}>{
-            typeof v === "object" ? JSON.stringify(v) : String(v)
-          }</span>
-        </div>
+        <PayloadRow key={k} k={k} v={v} />
       ))}
+    </div>
+  );
+}
+
+function PayloadRow({ k, v }: { k: string; v: any }) {
+  const rendered = typeof v === "object" ? JSON.stringify(v) : String(v);
+  const isLong = rendered.length > 120;
+  const [expanded, setExpanded] = useState(false);
+  const display = !isLong || expanded
+    ? rendered
+    : rendered.slice(0, 120) + "…";
+  return (
+    <div style={{ wordBreak: "break-word", whiteSpace: "pre-wrap", lineHeight: 1.5 }}>
+      <span className="k">{k}:</span>{" "}
+      <span className={typeof v === "number" ? "n" : "s"}>{display}</span>
+      {isLong && (
+        <button
+          onClick={() => setExpanded(e => !e)}
+          style={{
+            marginLeft: 6,
+            border: "none",
+            background: "transparent",
+            color: "var(--susu-accent)",
+            cursor: "pointer",
+            font: "inherit",
+            padding: 0,
+            textDecoration: "underline",
+            textUnderlineOffset: 2,
+          }}
+        >
+          {expanded ? "Show less" : "Show more"}
+        </button>
+      )}
     </div>
   );
 }
