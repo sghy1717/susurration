@@ -103,10 +103,64 @@ identityRoutes.post("/identity/ping", async (c) => {
   }
 });
 
+// Phase 17 — Daemon ping carries a config snapshot so the web dashboard's
+// Agent state panel can show provider / execution mode / broker / conv
+// threshold / min size factor without SSHing into the daemon host.
+//
+// Semantics: daemon is the source of truth. When daemon SENDS a body, we
+// overwrite every field present in the body — including null (= "daemon
+// knows but value is unset / disabled"). Fields ABSENT from the body keep
+// their prior value (so an old daemon that posts no body just updates the
+// timestamp). This lets the dashboard reflect "paper trading disabled" as
+// execution_mode=null → "—" instead of stale "paper" (G review #3).
 identityRoutes.post("/identity/daemon-ping", async (c) => {
   try {
     const address = await authedAddress(c.req.header("authorization"));
-    await sql`UPDATE identities SET last_daemon_ping_at = now() WHERE address = ${address}`;
+
+    let body: any = null;
+    try {
+      const text = await c.req.text();
+      if (text && text.length > 0) body = JSON.parse(text);
+    } catch { /* ignore — treat as no body */ }
+
+    // `has`: was the field present in the body at all?
+    // `val`: parsed value (null if explicitly null or invalid).
+    const has = (k: string) => body != null && Object.prototype.hasOwnProperty.call(body, k);
+
+    const provider           = has("provider")           ? (body.provider != null ? String(body.provider).slice(0, 80) : null) : undefined;
+    const exec_raw           = has("execution_mode")     ? (body.execution_mode != null ? String(body.execution_mode).toLowerCase() : null) : undefined;
+    const execution_mode     = exec_raw === undefined ? undefined : (exec_raw === "paper" || exec_raw === "live" ? exec_raw : null);
+    const broker_connected   = has("broker_connected")   ? (body.broker_connected != null ? Boolean(body.broker_connected) : null) : undefined;
+    const conv_threshold     = has("conv_threshold")     ? (Number.isFinite(Number(body.conv_threshold)) ? Number(body.conv_threshold) : null) : undefined;
+    const min_size_factor    = has("min_size_factor")    ? (Number.isFinite(Number(body.min_size_factor)) ? Number(body.min_size_factor) : null) : undefined;
+
+    // Parse + validate timestamp instead of casting raw (G review #6).
+    let daemon_started_at: string | null | undefined;
+    if (!has("daemon_started_at")) {
+      daemon_started_at = undefined;
+    } else if (body.daemon_started_at == null) {
+      daemon_started_at = null;
+    } else {
+      const parsed = new Date(String(body.daemon_started_at));
+      daemon_started_at = isNaN(parsed.getTime()) ? null : parsed.toISOString();
+    }
+
+    // Always bump last_daemon_ping_at. Optionally PATCH only the body-present
+    // config fields (so a daemon posting no body just refreshes the ping
+    // timestamp — preserves backwards compatibility).
+    const patch: Record<string, any> = {};
+    if (provider          !== undefined) patch.daemon_provider          = provider;
+    if (execution_mode    !== undefined) patch.daemon_execution_mode    = execution_mode;
+    if (broker_connected  !== undefined) patch.daemon_broker_connected  = broker_connected;
+    if (conv_threshold    !== undefined) patch.daemon_conv_threshold    = conv_threshold;
+    if (min_size_factor   !== undefined) patch.daemon_min_size_factor   = min_size_factor;
+    if (daemon_started_at !== undefined) patch.daemon_started_at        = daemon_started_at;
+
+    if (Object.keys(patch).length > 0) {
+      await sql`UPDATE identities SET last_daemon_ping_at = now(), ${sql(patch)} WHERE address = ${address}`;
+    } else {
+      await sql`UPDATE identities SET last_daemon_ping_at = now() WHERE address = ${address}`;
+    }
     return c.json({ ok: true });
   } catch (e) {
     if (e instanceof AuthError) return c.json({ error: e.reason }, e.status as 400 | 401);

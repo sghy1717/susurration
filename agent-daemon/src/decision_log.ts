@@ -1,15 +1,14 @@
-// Decision log — pretty-print every LLM decision to stdout (for the human
-// glancing at the daemon terminal) and append a JSONL line to a file (for
-// post-hoc analysis or audit). This is the "看到 agent 在做什么" surface
-// that builds user trust during the early product period: humans should
-// always be able to see WHY the agent did what it did.
+// Decision log — pretty-print every IDE-agent invocation to stdout (for the
+// human glancing at the daemon terminal) and append a JSONL line to a file
+// (for post-hoc analysis). After the Phase 18 refactor, the agent's actual
+// decision is captured on the backend (because the IDE-agent acts via
+// susu_* MCP tools); this log records that the daemon DISPATCHED an event
+// to the agent — invocation result, not decision content.
 
 import { appendFile } from "node:fs/promises";
-import type { AgentContext, AgentDecision, CallStats } from "./llm.ts";
 
 const RESET = "\x1b[0m";
 const DIM = "\x1b[2m";
-const BOLD = "\x1b[1m";
 const CYAN = "\x1b[36m";
 const YELLOW = "\x1b[33m";
 const GREEN = "\x1b[32m";
@@ -17,7 +16,6 @@ const RED = "\x1b[31m";
 
 function isTTY(): boolean { return process.stdout.isTTY === true; }
 function dim(s: string): string { return isTTY() ? `${DIM}${s}${RESET}` : s; }
-function bold(s: string): string { return isTTY() ? `${BOLD}${s}${RESET}` : s; }
 function color(s: string, c: string): string { return isTTY() ? `${c}${s}${RESET}` : s; }
 
 function shortId(id: string): string { return id.slice(0, 8); }
@@ -28,13 +26,14 @@ function fmtTime(): string {
 }
 
 export interface LogEntry {
-  ctx: AgentContext;
-  decision: AgentDecision;
-  stats: CallStats;
-  /** Optional ID + cost the daemon got back from the action it executed. */
-  result?: { id: string; cost_usd: number };
-  /** Set if the action threw — the daemon will still log the LLM's intent. */
-  error?: string;
+  triggering_event: unknown;
+  invocation: {
+    runner: string;
+    duration_ms: number;
+    exit_code: number | null;
+  };
+  /** Tail of the agent CLI's stdout — used only for debugging silent agents. */
+  stdout_tail?: string;
 }
 
 export class DecisionLog {
@@ -47,36 +46,22 @@ export class DecisionLog {
 
   private printToTerminal(e: LogEntry): void {
     const t = dim(fmtTime());
-    const triggerPreview = previewEvent(e.ctx.triggering_event);
-    process.stdout.write(`${t}  ${color(e.ctx.channel_label, CYAN)}  ${triggerPreview}\n`);
-    process.stdout.write(`  ${dim("⌥ context:")} ${e.ctx.recent_events.length} recent events\n`);
+    const triggerPreview = previewEvent(e.triggering_event);
+    process.stdout.write(`${t}  ${triggerPreview}\n`);
     process.stdout.write(
-      `  ${dim("⌥ LLM:")} ${e.stats.provider}/${e.stats.model}  ` +
-      `${e.stats.input_tokens}↑ ${e.stats.output_tokens}↓ tok  ` +
-      `${(e.stats.latency_ms / 1000).toFixed(2)}s\n`,
+      `  ${dim("⌥ runner:")} ${e.invocation.runner}  ` +
+      `${(e.invocation.duration_ms / 1000).toFixed(2)}s  ` +
+      `exit=${color(String(e.invocation.exit_code ?? "timeout"), e.invocation.exit_code === 0 ? GREEN : RED)}\n`,
     );
-    const decisionLine = formatDecision(e.decision);
-    process.stdout.write(`  ${dim("⌥ decision:")} ${decisionLine}\n`);
-    if (e.error) {
-      process.stdout.write(`  ${color("⌥ ERROR:", RED)} ${e.error}\n`);
-    } else if (e.result) {
-      process.stdout.write(
-        `  ${color("⌥ executed:", GREEN)} id=${shortId(e.result.id)} cost=$${e.result.cost_usd.toFixed(4)}\n`,
-      );
-    }
     process.stdout.write("\n");
   }
 
   private async appendToFile(e: LogEntry): Promise<void> {
     const line = JSON.stringify({
       ts: new Date().toISOString(),
-      channel_label: e.ctx.channel_label,
-      triggering_event: e.ctx.triggering_event,
-      recent_event_count: e.ctx.recent_events.length,
-      decision: e.decision,
-      stats: e.stats,
-      result: e.result,
-      error: e.error,
+      triggering_event: e.triggering_event,
+      invocation: e.invocation,
+      stdout_tail: e.stdout_tail,
     }) + "\n";
     try { await appendFile(this.filePath!, line, "utf8"); } catch {
       // Don't crash the daemon over log file issues.
@@ -105,12 +90,4 @@ function previewPayload(p: any): string {
   if (typeof p === "object" && typeof p.text === "string") return previewPayload(p.text);
   const s = JSON.stringify(p);
   return s.length > 80 ? s.slice(0, 77) + "..." : s;
-}
-
-function formatDecision(d: AgentDecision): string {
-  switch (d.kind) {
-    case "noop": return `${dim("noop")} — ${d.reason}`;
-    case "react": return `${color("react", GREEN)} ${shortId(d.signal_id)} ${JSON.stringify(d.payload)} — ${d.reason}`;
-    case "push": return `${color("push", YELLOW)} ${shortId(d.channel_id)} ${JSON.stringify(d.payload)} — ${d.reason}`;
-  }
 }

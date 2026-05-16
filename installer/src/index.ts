@@ -30,8 +30,9 @@ interface CliArgs {
   command: "install" | "uninstall" | "help";
   token: string;
   baseUrl: string;
-  llmKey?: string;
-  llmProvider?: "anthropic" | "openai";
+  // Phase 18 — agent runner CLI replaces the removed LLM key flow.
+  runnerCommand?: string;
+  runnerArgs?: string[];
   noPrompt: boolean;  // CI mode — auto-confirm everything
   onlyIde?: string;    // restrict to one IDE (testing)
 }
@@ -59,8 +60,8 @@ function parseArgs(argv: string[]): CliArgs {
       }
       args.baseUrl = url;
     }
-    else if (a === "--llm-key") args.llmKey = argv[++i];
-    else if (a === "--llm-provider") args.llmProvider = argv[++i] as any;
+    else if (a === "--runner-command") args.runnerCommand = argv[++i];
+    else if (a === "--runner-args") args.runnerArgs = (argv[++i] ?? "").split(/\s+/).filter(Boolean);
     else if (a === "--no-prompt") args.noPrompt = true;
     else if (a === "--only") args.onlyIde = argv[++i];
     else if (a === "--help" || a === "-h") args.command = "help";
@@ -78,8 +79,9 @@ USAGE
 OPTIONS
   --token <sk_xxx>          Your SUSU bearer token (from https://susurration.xyz onboarding)
   --base-url <url>          Backend base URL (default: ${DEFAULT_BASE_URL})
-  --llm-key <sk-...>        LLM API key. If omitted, ANTHROPIC_API_KEY / OPENAI_API_KEY env vars are tried.
-  --llm-provider <name>     Force provider: anthropic | openai (auto-detected from key prefix otherwise)
+  --runner-command <cli>    IDE-agent CLI to delegate decisions to. Auto-detected
+                            (claude → codex). Override for custom setups.
+  --runner-args <flags>     Flags passed before the prompt (default: -p).
   --no-prompt               Auto-confirm all prompts (CI mode)
   --only <ide>              Restrict to one IDE: claude | cursor | windsurf | cline | codex
   -h, --help                Show this help
@@ -88,13 +90,15 @@ WHAT IT DOES
   1. Detects which AI IDEs are installed on this machine
   2. Asks you which IDEs to configure (default: all detected)
   3. Installs the Susurration agent daemon globally via npm
-  4. Writes MCP config to each chosen IDE
-  5. Writes ~/.susu/agent-config.json with your token + LLM key
+  4. Writes MCP config to each chosen IDE so your agent gets susu_* tools
+  5. Writes ~/.susu/agent-config.json with your token + IDE-agent runner
   6. Spawns the daemon in the background
   7. Tells you to quit + reopen your IDE (MCP loads on startup)
 
-After completion, your IDE's AI agent will be able to use Susurration MCP tools,
-and the daemon will auto-evaluate incoming signals from peers via your LLM.
+After completion, your IDE's AI agent gets the susu_* MCP tools, and the
+daemon delegates every peer signal to your agent CLI — running with your
+CLAUDE.md, your MCP servers, your skills, your memory. No LLM API key
+required; your IDE's subscription / login covers it.
 
 DOCS  https://susurration.xyz/docs
 `);
@@ -278,10 +282,20 @@ function configureClaudeCode(ctx: McpConfigContext): { ok: true } | { ok: false;
   if (!commandExists("claude")) {
     return { ok: false, reason: "`claude` CLI not on PATH — install Claude Code first" };
   }
-  // Idempotent: remove then re-add (Claude's `add` errors if already exists)
-  try { spawnSync("claude", ["mcp", "remove", "susurration"], { stdio: "ignore" }); } catch { /* fine */ }
+  // Idempotent: remove then re-add (Claude's `add` errors if already exists).
+  // Remove from BOTH user and local scopes — a previous installer run may have
+  // written to either, and a leftover local-scope entry would shadow our new
+  // user-scope one for project-rooted Claude sessions.
+  try { spawnSync("claude", ["mcp", "remove", "susurration", "--scope", "user"], { stdio: "ignore" }); } catch { /* fine */ }
+  try { spawnSync("claude", ["mcp", "remove", "susurration", "--scope", "local"], { stdio: "ignore" }); } catch { /* fine */ }
+  // Phase 18 — must be `--scope user`. The agent-daemon spawns `claude -p` from
+  // the user's $HOME, which is outside any project directory; local-scope MCP
+  // entries (Claude's default) only load when claude is invoked inside the
+  // project that registered them. Without user scope, the daemon's headless
+  // claude call sees zero susu_* tools and every dispatch is a no-op.
   const args = [
     "mcp", "add", "susurration",
+    "--scope", "user",
     "-e", `SUSU_TOKEN=${ctx.token}`,
     ...(ctx.baseUrl !== DEFAULT_BASE_URL ? ["-e", `SUSU_BASE_URL=${ctx.baseUrl}`] : []),
     "--", "npx", "-y", MCP_NPM_NAME,
@@ -346,60 +360,69 @@ function installDaemonGlobally(): { ok: true; elapsedMs: number } | { ok: false;
   return { ok: true, elapsedMs: Date.now() - start };
 }
 
-interface LlmDetection {
-  provider: "anthropic" | "openai";
-  api_key: string;
-  model: string;
-  source: "cli-arg" | "env-anthropic" | "env-openai";
+// Phase 18 — installer detects the user's IDE-agent CLI instead of an LLM
+// API key. Daemon delegates every decision to that CLI (which runs with
+// the user's full context: CLAUDE.md, MCP servers, skills, memory).
+// See ADRs/2026-05-16-agent-daemon-ide-runner.md for the why.
+interface RunnerDetection {
+  command: string;          // CLI name on PATH (e.g. "claude")
+  args: string[];           // flags before the prompt
+  display_name: string;     // for log line
+  source: "cli-arg" | "auto-claude" | "auto-codex";
 }
 
-function detectLlmKey(args: CliArgs): LlmDetection | null {
-  if (args.llmKey) {
-    const provider: "anthropic" | "openai" = args.llmProvider ?? (args.llmKey.startsWith("sk-ant-") ? "anthropic" : "openai");
+function detectAgentRunner(args: CliArgs): RunnerDetection | null {
+  // CLI override always wins.
+  if (args.runnerCommand) {
     return {
-      provider,
-      api_key: args.llmKey,
-      model: provider === "anthropic" ? "claude-sonnet-4-6" : "gpt-5",
+      command: args.runnerCommand,
+      args: args.runnerArgs ?? ["-p"],
+      display_name: args.runnerCommand,
       source: "cli-arg",
     };
   }
-  if (process.env.ANTHROPIC_API_KEY) {
+  // Auto-detect known headless-capable IDE CLIs in priority order.
+  if (commandExists("claude")) {
     return {
-      provider: "anthropic",
-      api_key: process.env.ANTHROPIC_API_KEY,
-      model: "claude-sonnet-4-6",
-      source: "env-anthropic",
+      command: "claude",
+      args: ["-p"],
+      display_name: "Claude Code",
+      source: "auto-claude",
     };
   }
-  if (process.env.OPENAI_API_KEY) {
+  if (commandExists("codex")) {
     return {
-      provider: "openai",
-      api_key: process.env.OPENAI_API_KEY,
-      model: "gpt-5",
-      source: "env-openai",
+      command: "codex",
+      args: ["-p"],
+      display_name: "Codex CLI",
+      source: "auto-codex",
     };
   }
   return null;
 }
 
-function writeDaemonConfig(token: string, baseUrl: string, llm: LlmDetection): string {
+function writeDaemonConfig(token: string, baseUrl: string, runner: RunnerDetection): string {
   const home = homedir();
   const configPath = join(home, ".susu", "agent-config.json");
   backupFile(configPath);
   const config = {
     api_url: baseUrl,
     token,
-    llm: {
-      provider: llm.provider,
-      api_key: llm.api_key,
-      model: llm.model,
+    // Phase 18 — IDE-agent runner config (replaces removed `llm` block).
+    agent_runner: {
+      command: runner.command,
+      args: runner.args,
+      // cwd defaults to $HOME inside daemon if omitted; keep it explicit so
+      // the agent loads the user's global CLAUDE.md without ambiguity.
+      cwd: home,
+      timeout_ms: 90_000,
+      // Only allow the agent to call susurration MCP tools during unattended
+      // dispatches. Prevents a misbehaving prompt from editing user files.
+      allowed_tools: ["mcp__susurration__*"],
+      // Modest per-event budget cap (Claude Code only — others ignore).
+      max_budget_usd: 0.5,
     },
     agent: {
-      system_prompt:
-        "You are a trading-signal evaluation agent on Susurration. When a peer pushes a signal, " +
-        "evaluate it and choose: react_to_signal (+1 / -1 with size_factor 0..1), push_signal (rare — " +
-        "only if you have your own alpha to share), or do_nothing. Be conservative — react only when " +
-        "you have a clear directional view. Always include a brief `note` explaining your reasoning.",
       max_calls_per_minute: 10,
       history_per_channel: 20,
     },
@@ -537,16 +560,22 @@ async function cmdInstall(args: CliArgs): Promise<number> {
   section(3, "Connecting to Susurration…");
   const stage3Start = Date.now();
   void telemetry.stage(3, "running");
-  const llm = detectLlmKey(args);
-  if (!llm) {
-    fail("No LLM API key found. Set ANTHROPIC_API_KEY or OPENAI_API_KEY env var, or pass --llm-key. Daemon needs an LLM to evaluate signals.");
-    info(`Get an Anthropic key: https://console.anthropic.com  •  OpenAI: https://platform.openai.com/api-keys`);
-    void telemetry.stage(3, "fail", { error_hint: "no_llm_key" });
-    void telemetry.complete(false, { fail_reason: "no_llm_key", total_elapsed_ms: Date.now() - installStart, ides_configured: configured });
+  // Phase 18 — detect the user's IDE-agent CLI (Claude Code / Codex / etc.)
+  // No more LLM API key required. The daemon runs the user's CLI, which
+  // authenticates via its own subscription / login.
+  const runner = detectAgentRunner(args);
+  if (!runner) {
+    fail(
+      "No IDE-agent CLI found on PATH. Install Claude Code " +
+      "(`npm install -g @anthropic-ai/claude-code`) or Codex CLI, then re-run.\n" +
+      "Or pass --runner-command <cli-name> to use a different agent CLI.",
+    );
+    void telemetry.stage(3, "fail", { error_hint: "no_agent_runner" });
+    void telemetry.complete(false, { fail_reason: "no_agent_runner", total_elapsed_ms: Date.now() - installStart, ides_configured: configured });
     return 1;
   }
-  ok(`LLM detected: ${llm.provider} (source: ${llm.source})`);
-  const configPath = writeDaemonConfig(args.token, args.baseUrl, llm);
+  ok(`agent runner detected: ${runner.display_name} (source: ${runner.source})`);
+  const configPath = writeDaemonConfig(args.token, args.baseUrl, runner);
   ok(`wrote ${configPath}`);
   const spawnResult = spawnDaemonDetached(configPath);
   if (!spawnResult.ok) {

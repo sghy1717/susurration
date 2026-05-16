@@ -1,6 +1,6 @@
 {
   "name": "susurration-agent-daemon",
-  "version": "0.0.18",
+  "version": "0.0.20",
   "description": "Susurration agent runtime — long-running daemon that watches your channels, calls your LLM, and pushes reactions/signals on your behalf.",
   "type": "module",
   "bin": {

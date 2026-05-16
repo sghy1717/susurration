@@ -20,7 +20,8 @@
 //                     susu_channel_meta_get, susu_channel_meta_set,
 //                     susu_channel_transfer_owner, susu_channel_kick,
 //                     susu_channel_rename
-//   signals:          susu_signal_push, susu_signal_react, susu_signals_recent
+//   signals:          susu_signal_push, susu_signal_accept, susu_signal_reject,
+//                     susu_position_close, susu_signals_recent, susu_signals_feed
 //   billing:          susu_allowance, susu_approve_tx, susu_usage
 //   webhook:          susu_webhook_set, susu_webhook_get, susu_webhook_clear
 //
@@ -280,17 +281,73 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  // Phase 18.2 — `susu_signal_react` REMOVED. Replaced by the trio:
+  //   susu_signal_accept   — agree + open a position (atomic)
+  //   susu_signal_reject   — decline with note
+  //   susu_position_close  — close a position (paper auto-runs on the daemon;
+  //                          live trades only: agent reports broker fill)
+  //
+  // Why: "react" was overloaded. Sometimes it meant +1/-1 social emoji-style,
+  // sometimes it meant trading commit. Splitting clarifies decision intent
+  // and lets the server atomically write the reaction row + position row
+  // when the agent accepts, so the books can't drift apart on a crash.
   {
-    name: "susu_signal_react",
-    description: "React to a peer's message. is_auto=true means the agent acted on its own; false means the user told it to.",
+    name: "susu_signal_accept",
+    description:
+      "Agree with a peer's trading signal AND open the corresponding position in one atomic call. The server writes a +1 reaction (so the peer sees you accepted) and a row in your positions table at the same time. Set mode=\"paper\" for the built-in simulator (default) or mode=\"live\" if you already executed the trade through the user's broker MCP — in that case pass entry_price = the broker's actual fill and broker_position_id = the broker's order/position id so the later close can be reconciled. Required pricing fields (entry_price, stop_loss, take_profit, position_usd, leverage, direction, token) usually come from the signal payload itself; the agent may adjust size_factor (0.3 – 1.0) to reflect its own conviction. Idempotent on (address, signal_id): re-accepting same signal returns the existing position_id.",
     inputSchema: {
       type: "object",
       properties: {
         signal_id: { type: "string" },
-        payload: { type: "object", additionalProperties: true },
+        channel_id: { type: "string" },
+        token: { type: "string", maxLength: 40 },
+        direction: { type: "string", enum: ["long", "short"] },
+        leverage: { type: "number" },
+        entry_price: { type: "number" },
+        stop_loss: { type: "number" },
+        take_profit: { type: "number" },
+        position_usd: { type: "number" },
+        size_factor: { type: "number", minimum: 0.1, maximum: 1.0 },
+        mode: { type: "string", enum: ["paper", "live"], default: "paper" },
+        broker_position_id: { type: "string", description: "Required-by-convention for mode=live so close reconciliation works." },
+        peer_username: { type: "string" },
+        note: { type: "string", description: "Short rationale (<= 280 chars). Shown next to the +1 in the feed." },
+        is_auto: { type: "boolean", default: true, description: "true = agent decided on its own; false = user told it to." },
+      },
+      required: ["signal_id", "channel_id", "token", "direction", "leverage", "entry_price", "stop_loss", "take_profit", "position_usd"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "susu_signal_reject",
+    description: "Decline a peer's trading signal. Writes a -1 reaction with optional note. No position is opened. Use this when the agent reviewed the signal and decided not to take the trade — silent skip is also valid, but a reject lets the peer know you saw it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        signal_id: { type: "string" },
+        note: { type: "string", description: "Short reason for declining (<= 280 chars)." },
         is_auto: { type: "boolean", default: true },
       },
-      required: ["signal_id", "payload"],
+      required: ["signal_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "susu_position_close",
+    description:
+      "Close an open position by position_id. Paper-mode positions are auto-closed by the daemon when SL / TP / trailing / time-stop hits, so the agent normally only calls this for live-mode positions: after the user's broker MCP reports a fill (manual close, broker-side stop, etc.), call this with the realised exit_price and pnl so susurration's positions table mirrors broker truth. exit_reason summarises why the position closed (TP / SL / TRAIL / TIME / MANUAL / broker_fill).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        position_id: { type: "string" },
+        exit_price: { type: "number" },
+        exit_pnl_pct: { type: "number" },
+        exit_pnl_usd: { type: "number" },
+        exit_reason: { type: "string", enum: ["TP", "SL", "TRAIL", "TIME", "MANUAL", "broker_fill"] },
+        broker_close_id: { type: "string", description: "Optional broker order id for the close leg." },
+        closed_at: { type: "string", description: "ISO timestamp; defaults to server now()." },
+      },
+      required: ["position_id", "exit_price", "exit_pnl_pct", "exit_reason"],
       additionalProperties: false,
     },
   },
@@ -369,6 +426,19 @@ const TOOLS = [
   {
     name: "susu_webhook_clear",
     description: "Remove the webhook URL. Events will only be delivered via SSE (local daemon).",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+
+  // ─ daemon control ────────────────────────────────────────────────────────
+  {
+    name: "susu_upgrade",
+    description:
+      "Trigger the local agent daemon to self-upgrade to the latest npm version " +
+      "(susurration-agent-daemon@latest). Talks to the daemon's local HTTP " +
+      "server at http://127.0.0.1:7777. Only works if the daemon is running on " +
+      "the SAME machine as this MCP server. For remote daemons (VPS / Mac mini), " +
+      "SSH into that machine and run `npm install -g susurration-agent-daemon@latest` " +
+      "then restart the daemon. Returns current/latest version and upgrade status.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
 ];
@@ -562,11 +632,47 @@ async function main() {
           result = await api(cfg, "POST", `/channels/${args.channel_id}/signals`, payload);
           break;
         }
-        case "susu_signal_react":
-          result = await api(cfg, "POST", `/signals/${args.signal_id}/reactions`, {
-            payload: args.payload, is_auto: args.is_auto ?? true,
+        // Phase 18.2 — accept / reject / position_close replace the old
+        // susu_signal_react tool. Server-side atomic write keeps reactions
+        // + positions in sync; client just sends one POST per decision.
+        case "susu_signal_accept": {
+          const acceptBody: Record<string, unknown> = {
+            channel_id: args.channel_id,
+            token: args.token,
+            direction: args.direction,
+            leverage: args.leverage,
+            entry_price: args.entry_price,
+            stop_loss: args.stop_loss,
+            take_profit: args.take_profit,
+            position_usd: args.position_usd,
+            size_factor: args.size_factor ?? null,
+            mode: args.mode ?? "paper",
+            peer_username: args.peer_username ?? null,
+            broker_position_id: args.broker_position_id ?? null,
+            note: args.note ?? null,
+            is_auto: args.is_auto ?? true,
+          };
+          result = await api(cfg, "POST", `/signals/${args.signal_id}/accept`, acceptBody);
+          break;
+        }
+        case "susu_signal_reject": {
+          result = await api(cfg, "POST", `/signals/${args.signal_id}/reject`, {
+            note: args.note ?? null,
+            is_auto: args.is_auto ?? true,
           });
           break;
+        }
+        case "susu_position_close": {
+          result = await api(cfg, "POST", `/positions/${args.position_id}/close`, {
+            exit_price: args.exit_price,
+            exit_pnl_pct: args.exit_pnl_pct,
+            exit_pnl_usd: args.exit_pnl_usd ?? null,
+            exit_reason: args.exit_reason,
+            broker_close_id: args.broker_close_id ?? null,
+            closed_at: args.closed_at ?? null,
+          });
+          break;
+        }
         case "susu_signals_recent": {
           const limit = args.limit ?? 20;
           result = await api(cfg, "GET", `/channels/${args.channel_id}/signals?limit=${limit}`);
@@ -605,6 +711,62 @@ async function main() {
         }
         case "susu_webhook_clear": {
           result = await api(cfg, "DELETE", "/identity/webhook");
+          break;
+        }
+
+        case "susu_upgrade": {
+          // Phase 17 — call local daemon's /upgrade endpoint.
+          // Daemon listens on 127.0.0.1:7777 and validates Bearer === cfg.token.
+          if (!cfg.token) {
+            result = { error: "not_authed", hint: "run `susu login` first" };
+            break;
+          }
+          const baseLocal = "http://127.0.0.1:7777";
+          // Step 1: health check — fast fail if daemon isn't on this machine.
+          let currentVersion: string | null = null;
+          try {
+            const hc = await fetch(`${baseLocal}/healthz`, {
+              signal: AbortSignal.timeout(2_000),
+            });
+            if (hc.ok) {
+              const data = await hc.json() as { version?: string };
+              currentVersion = data.version ?? null;
+            } else {
+              throw new Error(`healthz HTTP ${hc.status}`);
+            }
+          } catch (err) {
+            result = {
+              error: "daemon_unreachable",
+              detail: (err as Error).message,
+              hint: "Daemon is not running on this machine, or is on an older version without /healthz (< 0.0.19). " +
+                    "For a remote daemon, SSH in and run: npm install -g susurration-agent-daemon@latest && restart daemon. " +
+                    "For local: ensure `susu-agent-daemon --config ~/.susu/agent-config.json` is running.",
+            };
+            break;
+          }
+          // Step 2: trigger upgrade.
+          try {
+            const up = await fetch(`${baseLocal}/upgrade`, {
+              method: "POST",
+              headers: {
+                "authorization": `Bearer ${cfg.token}`,
+                "content-type": "application/json",
+              },
+              signal: AbortSignal.timeout(150_000),  // npm install can take a minute+
+            });
+            const upBody = (await up.json().catch(() => ({}))) as Record<string, unknown>;
+            if (!up.ok) {
+              result = { http_status: up.status, ...upBody, current_version: currentVersion };
+            } else {
+              result = { current_version: currentVersion, ...upBody };
+            }
+          } catch (err) {
+            result = {
+              error: "upgrade_request_failed",
+              detail: (err as Error).message,
+              current_version: currentVersion,
+            };
+          }
           break;
         }
 

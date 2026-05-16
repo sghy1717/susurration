@@ -122,7 +122,11 @@ export function reportClientError(
 export function reportDaemonDecision(
   cfg: SusuClientConfig,
   params: {
-    kind: "react" | "noop" | "push" | "error";
+    /** invoke = Phase 18 IDE-agent runner dispatched the event; the agent's
+     *  actual react / push / noop choice now shows up directly on backend
+     *  (no central daemon view of it). react / noop / push retained for
+     *  back-compat in case future runner code paths attempt to introspect. */
+    kind: "react" | "noop" | "push" | "error" | "invoke";
     signal_id?: string;
     channel_id?: string;
     reaction_id?: string;
@@ -185,14 +189,19 @@ export function syncPaperOpen(
     daemon_local_id?: string;
   },
 ): void {
-  void authedFetch(cfg, `/paper_positions/open`, {
+  void authedFetch(cfg, `/positions/open`, {
     method: "POST",
     body: JSON.stringify(params),
   }).catch(() => {});
 }
 
 /** Phase 11a — Sync paper position close to server. Fire-and-forget. */
-export function syncPaperClose(
+/** Phase 17.5 — Returns a Promise that resolves on 2xx and throws on
+ *  network error / non-2xx. Caller (PaperCloseQueue) needs to distinguish
+ *  success from failure to retry on failure. Pre-17.5 this was fire-and-
+ *  forget with .catch(()=>{}) — that swallowed close failures and was the
+ *  root cause of the in-flight-crash data loss this fix targets. */
+export async function syncPaperClose(
   cfg: SusuClientConfig,
   params: {
     signal_id: string;
@@ -202,11 +211,19 @@ export function syncPaperClose(
     exit_pnl_usd?: number;
     closed_at?: string;
   },
-): void {
-  void authedFetch(cfg, `/paper_positions/close`, {
+): Promise<void> {
+  // 15s timeout — network hang would otherwise block trackPositions tick and
+  // pin flushInFlight=true, preventing newer enqueues from getting their
+  // first attempt until OS TCP timeout (~75s on macOS) fires.
+  const resp = await authedFetch(cfg, `/positions/close`, {
     method: "POST",
     body: JSON.stringify(params),
-  }).catch(() => {});
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => "");
+    throw new Error(`syncPaperClose HTTP ${resp.status}: ${body.slice(0, 200)}`);
+  }
 }
 
 /** Phase 11a — Backfill: fetch open positions from server (after daemon
@@ -215,7 +232,7 @@ export async function fetchPaperPositionsMine(
   cfg: SusuClientConfig,
   status: "open" | "closed" | "all" = "open",
 ): Promise<{ positions: any[] }> {
-  const resp = await authedFetch(cfg, `/paper_positions/mine?status=${status}`);
+  const resp = await authedFetch(cfg, `/positions/mine?status=${status}`);
   if (!resp.ok) return { positions: [] };
   return await resp.json() as any;
 }

@@ -1,0 +1,596 @@
+// All data hooks for the v2 redesigned dashboard.
+// Connects directly to the real Susurration backend — no mocks, no
+// placeholders. Each hook owns one logical data stream.
+//
+// Polling cadences are chosen for "feels alive" without burning the server:
+//   - prices             1.5s   (Bloomberg-tape speed)
+//   - positions          2s     (mark uses prices, so this is for state churn)
+//   - book snapshot      10s    (KPIs change slowly)
+//   - daemon state       8s     (config rarely changes)
+//   - peers / friends    30s    (very slow churn)
+// SSE stream replaces feed polling once connected.
+
+import { useEffect, useRef, useState, useCallback } from "react";
+import { api, ApiError, apiBase, session } from "../api";
+
+// ── shared types ─────────────────────────────────────────────────────────
+
+export interface BookSnapshot {
+  initial_balance_usd: number;
+  realized_pnl_total: number;
+  open_count: number;
+  closed_count: number;
+  wins: number;
+  losses: number;
+  break_even: number;
+  win_rate: number | null;
+  signals_received_24h: number;
+  signals_received_30d: number;
+  accepted_24h: number;
+  accepted_30d: number;
+  accept_rate_24h: number | null;
+  accept_rate_30d: number | null;
+}
+
+export interface EquityPoint {
+  day: string;                  // ISO date (YYYY-MM-DD)
+  realized_cumulative_usd: number;
+}
+
+export interface EquityResponse {
+  initial_balance_usd: number;
+  days: number;
+  points: EquityPoint[];
+}
+
+export interface Position {
+  position_id: string;
+  address: string;
+  signal_id: string;
+  channel_id: string;
+  token: string;
+  direction: "long" | "short";
+  leverage: number;
+  entry_price: number;
+  stop_loss: number;
+  take_profit: number;
+  position_usd: number;
+  size_factor: number | null;
+  peer_username: string | null;
+  is_replay: boolean;
+  opened_at: string;
+  closed_at: string | null;
+  exit_reason: string | null;
+  exit_price: number | null;
+  exit_pnl_pct: number | null;
+  exit_pnl_usd: number | null;
+  /** Phase 18.2 — paper = susurration's simulator; live = real broker trade
+   *  the agent executed and reported back. Pre-18.2 rows are paper. */
+  mode: "paper" | "live";
+  broker_position_id: string | null;
+}
+
+/** Phase 18.2 — dashboard selector for showing paper / live / both books. */
+export type ModeFilter = "all" | "paper" | "live";
+
+export interface DaemonState {
+  status: "online" | "stale" | "never_seen";
+  last_ping_at: string | null;
+  seconds_since_ping: number | null;
+  version: string | null;
+  provider: string | null;
+  execution_mode: "paper" | "live" | null;
+  broker_connected: boolean | null;
+  conv_threshold: number | null;
+  min_size_factor: number | null;
+  started_at: string | null;
+  uptime_seconds: number | null;
+}
+
+export interface PeerStat {
+  address: string;
+  username: string | null;
+  signal_count: number;
+  avg_conv: number | null;
+  top_assets: string[];
+  accepted_signals: number;
+  accept_rate: number | null;
+  realized_pnl_usd: number;
+  win_rate: number | null;
+  opens: number;
+  closes: number;
+  wins: number;
+  losses: number;
+  last_signal_at: string | null;
+}
+
+export interface PeerStatsResponse { days: number; peers: PeerStat[]; }
+
+export interface PeerDetailSignal {
+  signal_id: string;
+  channel_id: string;
+  channel_name: string | null;
+  payload: any;
+  created_at: string;
+  my_reaction_value: number | null;
+}
+
+export interface PeerDetailResponse {
+  days: number;
+  address: string;
+  stats: PeerStat | null;
+  recent_signals: PeerDetailSignal[];
+}
+
+export interface Friend {
+  friend_address: string;
+  friend_username: string | null;
+  channel_id: string;
+  created_at: string;
+}
+
+export interface PendingRequest {
+  request_id: string;
+  from_addr: string;
+  from_username: string | null;
+  created_at: string;
+}
+
+export interface ChannelGroup {
+  channel_id: string;
+  name: string | null;
+  owner: string | null;
+  is_group: boolean;
+  member_count: number;
+  created_at: string;
+}
+
+export interface FeedItem {
+  kind: string;
+  signal_id: string | null;
+  reaction_id: string | null;
+  parent_signal_id?: string | null;
+  channel_id: string;
+  from_address: string;
+  from_username: string | null;
+  payload: any;
+  created_at: string;
+  channel_name: string | null;
+  is_group?: boolean;
+  peer?: { address: string; username: string | null };
+  is_auto?: boolean;
+}
+
+export interface WhoAmI {
+  address: string;
+  username: string | null;
+  auto_accept_friends: boolean;
+  created_at: string;
+  last_mcp_ping_at: string | null;
+  last_daemon_ping_at: string | null;
+  last_daemon_version: string | null;
+}
+
+export interface Prices { prices: Record<string, number>; }
+
+// ── generic poll hook ────────────────────────────────────────────────────
+
+function usePoll<T>(
+  path: string | null,
+  intervalMs: number,
+  enabled: boolean = true,
+): { data: T | null; error: ApiError | null; loading: boolean; refetch: () => void } {
+  const [data, setData] = useState<T | null>(null);
+  const [error, setError] = useState<ApiError | null>(null);
+  const [loading, setLoading] = useState(true);
+  const abortRef = useRef<AbortController | null>(null);
+  const tickRef = useRef(0);
+
+  const fetchOnce = useCallback(async () => {
+    if (!path || !enabled) return;
+    abortRef.current?.abort();
+    const ctl = new AbortController();
+    abortRef.current = ctl;
+    const tick = ++tickRef.current;
+    try {
+      const res = await api<T>({ path });
+      if (tick !== tickRef.current) return; // stale
+      setData(res);
+      setError(null);
+    } catch (e) {
+      if (tick !== tickRef.current) return;
+      if (e instanceof ApiError) setError(e);
+      else setError(new ApiError(0, String(e), path));
+    } finally {
+      if (tick === tickRef.current) setLoading(false);
+    }
+  }, [path, enabled]);
+
+  useEffect(() => {
+    if (!path || !enabled) return;
+    fetchOnce();
+    const id = setInterval(fetchOnce, intervalMs);
+    return () => {
+      clearInterval(id);
+      abortRef.current?.abort();
+    };
+  }, [path, intervalMs, enabled, fetchOnce]);
+
+  return { data, error, loading, refetch: fetchOnce };
+}
+
+// ── concrete hooks ───────────────────────────────────────────────────────
+
+export function useWhoAmI() {
+  return usePoll<WhoAmI>("/identity/whoami", 60_000);
+}
+
+export function useBookSnapshot(mode: ModeFilter = "all") {
+  const q = mode === "all" ? "" : `?mode=${mode}`;
+  return usePoll<BookSnapshot>(`/book/snapshot${q}`, 10_000);
+}
+
+export function useBookEquity(days: number = 21, mode: ModeFilter = "all") {
+  const modeQ = mode === "all" ? "" : `&mode=${mode}`;
+  return usePoll<EquityResponse>(`/book/equity?days=${days}${modeQ}`, 60_000);
+}
+
+export function useOpenPositions(mode: ModeFilter = "all") {
+  // Server endpoint returns the raw position rows; we want them with marks
+  // overlaid client-side via /prices, so we keep this thin.
+  const q = mode === "all" ? "status=open" : `status=open&mode=${mode}`;
+  return usePoll<{ positions: Position[] }>(`/positions/mine?${q}`, 5_000);
+}
+
+export function useDaemonState() {
+  return usePoll<DaemonState>("/daemon/state", 8_000);
+}
+
+export function usePeersStats(days: number = 30) {
+  return usePoll<PeerStatsResponse>(`/peers/stats?days=${days}`, 30_000);
+}
+
+// ── daemon upgrade hook ──────────────────────────────────────────────────
+//
+// Phase 18.2-w — port of the v0 dashboard's UpgradeBanner state machine into
+// a v2-friendly hook. The flow:
+//   1. fetch our identity (`last_daemon_version`) + npm latest version
+//   2. if our daemon is behind, probe `127.0.0.1:7777/healthz` to see if
+//      one-click is available (= daemon is on this machine AND new enough to
+//      expose /upgrade)
+//   3. expose triggerOneClick + triggerCopy actions; the UI picks which
+//
+// The state machine deliberately mirrors v0 so the same edge cases (daemon
+// claims already_latest but server records older, polling timeout, etc.)
+// behave consistently. If we ever decommission the v0 dashboard, this hook
+// is the single place to keep iterating.
+
+export type UpgradeState = "idle" | "upgrading" | "polling" | "done" | "error";
+
+export interface UpgradeStatus {
+  currentVersion: string | null;
+  latestVersion: string | null;
+  needsUpgrade: boolean;
+  oneClickReady: boolean | null;  // null = still probing
+  state: UpgradeState;
+  error: string | null;
+  copied: boolean;
+  triggerOneClick: () => Promise<void>;
+  triggerCopyCommand: () => Promise<void>;
+  installerCmd: string;
+}
+
+const DAEMON_LOCAL_BASE = "http://127.0.0.1:7777";
+
+function semverLT(a: string, b: string): boolean {
+  const pa = a.split(".").map((n) => parseInt(n, 10));
+  const pb = b.split(".").map((n) => parseInt(n, 10));
+  for (let i = 0; i < 3; i++) {
+    const x = pa[i] ?? 0, y = pb[i] ?? 0;
+    if (x < y) return true;
+    if (x > y) return false;
+  }
+  return false;
+}
+
+export function useDaemonUpgrade(): UpgradeStatus {
+  const [currentVersion, setCurrentVersion] = useState<string | null>(null);
+  const [latestVersion, setLatestVersion] = useState<string | null>(null);
+  const [oneClickReady, setOneClickReady] = useState<boolean | null>(null);
+  const [state, setState] = useState<UpgradeState>("idle");
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  // 1. Fetch our daemon version + npm latest in parallel.
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([
+      api<{ last_daemon_version: string | null }>({ path: "/identity/whoami" }).catch(() => ({ last_daemon_version: null })),
+      api<{ version: string | null }>({ path: "/daemon/latest-version" }).catch(() => ({ version: null })),
+    ]).then(([me, latest]) => {
+      if (cancelled) return;
+      setCurrentVersion(me.last_daemon_version ?? null);
+      setLatestVersion(latest.version ?? null);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  const needsUpgrade =
+    currentVersion != null &&
+    latestVersion != null &&
+    semverLT(currentVersion, latestVersion);
+
+  // 2. Probe local daemon /healthz once we know an upgrade is pending. Two
+  //    aborts protect against the localhost call hanging: AbortController +
+  //    a 1.5s setTimeout fallback.
+  useEffect(() => {
+    if (!needsUpgrade || oneClickReady !== null) return;
+    let cancelled = false;
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 1500);
+    fetch(`${DAEMON_LOCAL_BASE}/healthz`, { signal: ctrl.signal })
+      .then((r) => r.ok ? r.json() : null)
+      .then((data: any) => {
+        clearTimeout(t);
+        if (cancelled) return;
+        setOneClickReady(!!data && typeof data.upgrade_endpoint === "string");
+      })
+      .catch(() => { clearTimeout(t); if (!cancelled) setOneClickReady(false); });
+    return () => { cancelled = true; ctrl.abort(); };
+  }, [needsUpgrade, oneClickReady]);
+
+  const installerCmd = ` npx -y @susurration/installer install --token ${session.token ?? "sk_live_YOUR_TOKEN"}`;
+
+  const triggerCopyCommand = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(installerCmd);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 3000);
+    } catch { /* clipboard denied; user can select text manually */ }
+    // Best-effort telemetry; ignore failure.
+    api({ path: "/onboarding/event", method: "POST", body: {
+      action: "upgrade_banner_click",
+      context: { current: currentVersion, latest: latestVersion, path: "copy" },
+    } }).catch(() => {});
+  }, [installerCmd, currentVersion, latestVersion]);
+
+  const triggerOneClick = useCallback(async () => {
+    setState("upgrading");
+    setError(null);
+    api({ path: "/onboarding/event", method: "POST", body: {
+      action: "upgrade_banner_click",
+      context: { current: currentVersion, latest: latestVersion, path: "one_click" },
+    } }).catch(() => {});
+
+    // Send the upgrade kick to the local daemon. npm install can take 30-60s
+    // on a cold cache; 150s upper bound matches v0.
+    let upgradeResp: any = null;
+    try {
+      const ctrl = new AbortController();
+      const timeoutId = setTimeout(() => ctrl.abort(), 150_000);
+      const r = await fetch(`${DAEMON_LOCAL_BASE}/upgrade`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${session.token ?? ""}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({}),
+        signal: ctrl.signal,
+      });
+      clearTimeout(timeoutId);
+      upgradeResp = await r.json().catch(() => null);
+      if (!r.ok) {
+        setState("error");
+        setError(upgradeResp?.error ? `${upgradeResp.error}${upgradeResp.hint ? ": " + upgradeResp.hint : ""}` : `HTTP ${r.status}`);
+        return;
+      }
+    } catch (err) {
+      setState("error");
+      setError((err as Error).message ?? "request failed");
+      return;
+    }
+
+    // already_latest path. Three sub-cases — same as v0 UpgradeBanner.
+    if (upgradeResp?.status === "already_latest") {
+      try {
+        const me = await api<{ last_daemon_version: string | null }>({ path: "/identity/whoami" });
+        let serverVersion = me.last_daemon_version;
+        if (serverVersion && latestVersion && !semverLT(serverVersion, latestVersion)) {
+          setState("done");
+          setCurrentVersion(serverVersion);
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 5_000));
+        const me2 = await api<{ last_daemon_version: string | null }>({ path: "/identity/whoami" }).catch(() => null);
+        serverVersion = me2?.last_daemon_version ?? serverVersion;
+        if (serverVersion && latestVersion && !semverLT(serverVersion, latestVersion)) {
+          setState("done");
+          setCurrentVersion(serverVersion);
+          return;
+        }
+        if (!serverVersion) {
+          // Case C — server hasn't seen the daemon yet. Trust daemon self-report.
+          setState("done");
+          setCurrentVersion(latestVersion);
+          return;
+        }
+        setState("error");
+        setError(`Daemon claims latest but server records v${serverVersion} — restart daemon manually`);
+      } catch {
+        setState("error");
+        setError("Could not verify upgrade status");
+      }
+      return;
+    }
+
+    // Normal upgrade path. Poll /healthz until version bumps or 60s timeout.
+    setState("polling");
+    const pollDeadline = Date.now() + 60_000;
+    const target = latestVersion;
+    while (Date.now() < pollDeadline) {
+      await new Promise((r) => setTimeout(r, 2_000));
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 1500);
+        const hc = await fetch(`${DAEMON_LOCAL_BASE}/healthz`, { signal: ctrl.signal });
+        clearTimeout(t);
+        if (hc.ok) {
+          const data = await hc.json() as { version?: string };
+          if (data.version && target && !semverLT(data.version, target) && data.version !== currentVersion) {
+            setState("done");
+            setCurrentVersion(data.version);
+            return;
+          }
+        }
+      } catch { /* still restarting */ }
+    }
+    setState("error");
+    setError("Daemon did not start within 60s after upgrade — restart manually");
+  }, [currentVersion, latestVersion]);
+
+  return {
+    currentVersion,
+    latestVersion,
+    needsUpgrade,
+    oneClickReady,
+    state,
+    error,
+    copied,
+    triggerOneClick,
+    triggerCopyCommand,
+    installerCmd,
+  };
+}
+
+export function usePeerDetail(address: string | null, days: number = 30) {
+  return usePoll<PeerDetailResponse>(
+    address ? `/peers/${encodeURIComponent(address)}/stats?days=${days}` : null,
+    20_000,
+    !!address,
+  );
+}
+
+export function useFriends() {
+  return usePoll<{ friends: Friend[] }>("/friends", 30_000);
+}
+
+export function usePendingRequests() {
+  return usePoll<{ requests: PendingRequest[] }>("/friends/requests", 30_000);
+}
+
+export function useChannelGroups() {
+  return usePoll<{ groups: ChannelGroup[] }>("/channels/groups", 30_000);
+}
+
+export function useSignalFeed(limit: number = 200) {
+  return usePoll<{ signals: FeedItem[]; count: number; limit: number }>(
+    `/signals/feed?limit=${limit}`,
+    20_000,
+  );
+}
+
+// ── prices (one HTTP call for current mark per token) ────────────────────
+
+export function usePrices(symbols: string[], intervalMs: number = 1500) {
+  // Symbol list is keyed by sorted order so the hook restarts only when the
+  // set changes, not on render-stable arrays with different identity.
+  const key = symbols.slice().sort().join(",");
+  return usePoll<Prices>(key ? `/prices?symbols=${encodeURIComponent(key)}` : null, intervalMs, key.length > 0);
+}
+
+// ── SSE feed stream — replaces poll once connected ──────────────────────
+
+export interface SSEFeedState {
+  events: FeedItem[];                          // newest first
+  status: "idle" | "connecting" | "open" | "error";
+  error: string | null;
+}
+
+export function useFeedSSE(initial: FeedItem[]) {
+  const [state, setState] = useState<SSEFeedState>({
+    events: initial,
+    status: "idle",
+    error: null,
+  });
+  // Seed events the FIRST time `initial` arrives non-empty. After that, SSE
+  // is the source of truth; we ignore subsequent polled snapshots so a new
+  // array identity from the parent poll doesn't loop us.
+  const seededRef = useRef(false);
+  useEffect(() => {
+    if (seededRef.current || initial.length === 0) return;
+    seededRef.current = true;
+    setState(s => ({ ...s, events: initial }));
+  }, [initial]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let es: EventSource | null = null;
+
+    async function connect() {
+      try {
+        setState(s => ({ ...s, status: "connecting", error: null }));
+        // Mint a short-lived stream token (EventSource can't send headers).
+        const tok = await api<{ token: string }>({
+          path: "/auth/stream-token",
+          method: "POST",
+        });
+        if (cancelled) return;
+        const url = apiBase.replace(/\/$/, "") + `/signals/feed/stream?stream_token=${encodeURIComponent(tok.token)}`;
+        es = new EventSource(url);
+        es.onopen = () => {
+          if (cancelled) return;
+          setState(s => ({ ...s, status: "open", error: null }));
+        };
+        es.onerror = () => {
+          if (cancelled) return;
+          setState(s => ({ ...s, status: "error", error: "stream disconnected" }));
+        };
+        const ingest = (e: MessageEvent) => {
+          if (cancelled || !e.data) return;
+          try {
+            const parsed = JSON.parse(e.data) as FeedItem;
+            setState(s => ({ ...s, events: [parsed, ...s.events].slice(0, 500) }));
+          } catch { /* malformed event */ }
+        };
+        ["signal", "reaction", "channel_member_added", "channel_member_removed", "channel_meta_changed", "channel_owner_transferred"].forEach(t => es!.addEventListener(t, ingest as any));
+      } catch (e) {
+        if (cancelled) return;
+        setState(s => ({ ...s, status: "error", error: e instanceof Error ? e.message : String(e) }));
+      }
+    }
+    if (session.token) connect();
+    return () => {
+      cancelled = true;
+      es?.close();
+    };
+  }, []);
+
+  return state;
+}
+
+// ── small helpers ────────────────────────────────────────────────────────
+
+export function pnlOf(p: Position, mark: number): number {
+  const dir = p.direction === "long" ? 1 : -1;
+  return ((mark - p.entry_price) / p.entry_price) * p.position_usd * p.leverage * dir;
+}
+
+export function durationStr(fromIso: string, nowMs: number = Date.now()): string {
+  const ms = nowMs - new Date(fromIso).getTime();
+  const m = Math.max(0, Math.floor(ms / 60000));
+  const h = Math.floor(m / 60);
+  return `${h}h ${String(m % 60).padStart(2, "0")}m`;
+}
+
+export function formatMoney(n: number): string {
+  return "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+export function formatPnl(n: number): string {
+  const abs = Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return (n >= 0 ? "+$" : "-$") + abs;
+}
+
+export function formatPercent(n: number, digits: number = 2): string {
+  return (n >= 0 ? "+" : "") + (n * 100).toFixed(digits) + "%";
+}

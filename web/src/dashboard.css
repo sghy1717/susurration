@@ -661,6 +661,41 @@
 }
 .positions-row:last-child { border-bottom: none; }
 .pos-token { font-weight: 600; color: var(--ink); font-size: 12px; }
+
+/* Phase 17.5 — historical-inferred row tag. Hover reveals explanation tooltip. */
+.backfill-tag {
+  position: relative;
+  margin-left: 6px;
+  font-size: 9px;
+  font-weight: 400;
+  font-style: italic;
+  letter-spacing: 0.3px;
+  color: var(--ink-faint);
+  cursor: help;
+}
+.backfill-tag-tooltip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 50;
+  display: none;
+  width: max-content;
+  max-width: 260px;
+  padding: 8px 10px;
+  background: var(--surface3, #1a1f2e);
+  border: 0.5px solid var(--accent-border, #2a3142);
+  border-radius: var(--radius-sm, 4px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 1.45;
+  white-space: normal;
+  pointer-events: none;
+}
+.backfill-tag:hover .backfill-tag-tooltip { display: block; }
 .pos-dir { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
 .pos-dir.long { color: var(--green); }
 .pos-dir.short { color: var(--red); }

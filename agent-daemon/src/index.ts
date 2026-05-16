@@ -35,36 +35,50 @@ import { readFile, writeFile, appendFile, mkdir, unlink } from "node:fs/promises
 import { unlinkSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawn } from "node:child_process";
-import {
-  AnthropicProvider, OpenAIProvider,
-  type LLMProvider, type AgentContext, type AgentDecision,
-} from "./llm.ts";
+import { IdeAgentRunner, commandOnPath, type AgentRunnerConfig, type RunnerInvocation, type RunnerResult } from "./agent_runner.ts";
 import { DecisionLog } from "./decision_log.ts";
 import { PaperTrader } from "./paper_trading.ts";
+import { LivePositionMonitor } from "./live_monitor.ts";
 import { normalizeSignalPayload } from "./normalize.ts";
 import {
   pushSignal, pushReaction, recentSignals, feedSince,
   reportClientError, reportDaemonDecision, DAEMON_VERSION,
   type SusuClientConfig,
 } from "./susu_actions.ts";
+import { startLocalServer, type LocalServerConfig } from "./local_server.ts";
 
 // ── Config ───────────────────────────────────────────────────────────────
 
 interface DaemonConfig {
   api_url: string;
   token: string;
-  llm: {
-    provider: "anthropic" | "openai";
-    api_key: string;
-    model: string;
-    /** Custom base URL for OpenAI-compatible APIs (DeepSeek, Gemini, Ollama, etc.) */
-    base_url?: string;
+  /** Phase 18 — Susurration daemon delegates decisions to the user's IDE
+   *  agent CLI (Claude Code / Codex / etc.). The daemon never calls LLM
+   *  SDKs directly; that violates the product thesis (user's agent, not
+   *  daemon's agent). See ADRs/2026-05-16-agent-daemon-ide-runner.md. */
+  agent_runner: {
+    /** CLI binary on PATH, e.g. "claude" / "codex". */
+    command: string;
+    /** Static args passed before the prompt. e.g. ["-p"] for claude headless. */
+    args?: string[];
+    /** Working directory for the spawned CLI. Defaults to $HOME so the
+     *  user's global CLAUDE.md / MCP config / skills load. */
+    cwd?: string;
+    /** Timeout per event. Defaults to 90s. */
+    timeout_ms?: number;
+    /** Restrict tools (forwarded as --allowed-tools to Claude Code). For
+     *  daemon mode we recommend "mcp__susurration__*" so the agent can
+     *  only touch the network, not the user's filesystem. */
+    allowed_tools?: string[];
+    /** Per-event budget cap. Forwarded as --max-budget-usd. */
+    max_budget_usd?: number;
   };
   agent: {
-    system_prompt: string;
-    /** Per-minute LLM call cap. Defaults to 10. */
+    /** Per-minute invocation cap. Protects the user's IDE subscription
+     *  quota — has nothing to do with LLM API rate limits anymore.
+     *  Defaults to 10. */
     max_calls_per_minute?: number;
-    /** How many recent events to feed the LLM as context. Defaults to 20. */
+    /** How many recent events to include in context. Defaults to 20. */
     history_per_channel?: number;
   };
   /** Daemon will write a JSONL log of every decision to this path. */
@@ -102,6 +116,17 @@ interface DaemonConfig {
    *  latency); the LLM reasoning stays local in agent-decisions.jsonl.
    *  Set to false if you want to keep your LLM reasoning fully local. */
   share_reasoning_summary?: boolean;
+  /** Phase 17 — local HTTP server for one-click self-upgrade.
+   *  Bound to 127.0.0.1:7777 by default. Disable by setting `{disabled:true}`
+   *  or by setting `local_server: false`. */
+  local_server?: LocalServerConfig | false;
+  /** Phase 18.2 — interval in ms between live-position monitor ticks. Each
+   *  tick is a GET (cheap); if any live positions are open, the agent is
+   *  spawned to reconcile them against the broker MCP. Spawn = real money,
+   *  so default is 30 min. Power users with active live trading + cheap
+   *  IDE subs can lower; users with no live positions can leave alone
+   *  (ticks are no-ops). Min ~60s enforced inside the monitor. */
+  live_monitor_interval_ms?: number;
 }
 
 function parseArgs(argv: string[]): { config?: string; once?: boolean } {
@@ -256,9 +281,26 @@ async function main(): Promise<number> {
   const cfg = await loadConfig(args);
   const susu: SusuClientConfig = { api_url: cfg.api_url, token: cfg.token };
 
-  const provider: LLMProvider = cfg.llm.provider === "openai"
-    ? new OpenAIProvider(cfg.llm.api_key, cfg.llm.model, cfg.llm.base_url)
-    : new AnthropicProvider(cfg.llm.api_key, cfg.llm.model);
+  // Phase 18 — instantiate IDE-agent runner. The user's IDE-agent CLI
+  // (Claude Code / Codex / etc.) is the decider; daemon dispatches events
+  // to it. Refuse to start if the configured CLI isn't on PATH — silent
+  // fallback to LLM SDK would let the thesis drift.
+  if (!commandOnPath(cfg.agent_runner.command)) {
+    process.stderr.write(
+      `[daemon] FATAL: configured agent runner '${cfg.agent_runner.command}' is not on PATH.\n` +
+      `         Install it (e.g. \`npm install -g @anthropic-ai/claude-code\`) and re-run.\n`,
+    );
+    return 1;
+  }
+  const runnerCfg: AgentRunnerConfig = {
+    command: cfg.agent_runner.command,
+    args: cfg.agent_runner.args ?? [],
+    cwd: cfg.agent_runner.cwd,
+    timeout_ms: cfg.agent_runner.timeout_ms,
+    allowed_tools: cfg.agent_runner.allowed_tools,
+    max_budget_usd: cfg.agent_runner.max_budget_usd,
+  };
+  const runner = new IdeAgentRunner(runnerCfg);
 
   const log = new DecisionLog(cfg.decision_log_path);
   const limiter = new MinuteRateLimiter(cfg.agent.max_calls_per_minute!);
@@ -275,9 +317,19 @@ async function main(): Promise<number> {
         susu,
       )
     : null;
-  // Phase 11a — best-effort startup backfill from server (after reinstall / new device).
+  // Phase 11a + Phase 17.5 — startup sync from server (open + closed history).
+  // We AWAIT this so trackPositions() doesn't tick on a partially-merged book.
+  // Then flush any pending close-queue entries left from prior daemon runs
+  // (close happened locally, sync failed, daemon crashed).
   if (paperTrader) {
-    void paperTrader.syncFromServerOnce();
+    await paperTrader.syncFromServerOnce();
+    const flushResult = await paperTrader.closeQueue.flush();
+    if (flushResult.tried > 0) {
+      process.stderr.write(
+        `[daemon] startup close-queue flush: tried=${flushResult.tried} ` +
+        `ok=${flushResult.ok} failed=${flushResult.failed} stale=${flushResult.stale}\n`,
+      );
+    }
   }
 
   // Discover own address + handle so we can skip self-events.
@@ -298,36 +350,145 @@ async function main(): Promise<number> {
   process.stderr.write(
     `[daemon] starting as ${myHandle ? `@${myHandle}` : `(${myAddress?.slice(0, 8) ?? "anon"})`}, ` +
     `mode=${mode}, ` +
-    `provider=${cfg.llm.provider}/${cfg.llm.model}, ` +
+    `runner=${cfg.agent_runner.command}, ` +
     `dry_run_pushes=${cfg.dry_run_pushes}` +
     `${paperTrader ? ", paper_trading=on" : ""}` +
     `, cap=${cfg.agent.max_calls_per_minute}/min\n`,
   );
 
   if (args.once) {
-    return await runOncePoll(susu, provider, log, limiter, cfg, myAddress, paperTrader);
+    return await runOncePoll(susu, runner, log, limiter, cfg, myAddress, myHandle, paperTrader);
   }
 
   // ── PID file + graceful shutdown ──────────────────────────────────────
   const pidPath = join(process.env.HOME ?? ".", ".susu", "agent-daemon.pid");
   await mkdir(dirname(pidPath), { recursive: true });
-  await writeFile(pidPath, String(process.pid), "utf8");
-  const cleanupPid = () => { try { unlinkSync(pidPath); } catch {} };
+  const ownPid = String(process.pid);
+  await writeFile(pidPath, ownPid, "utf8");
+  // Phase 18.2-w — only unlink the pid file if it still belongs to US. During
+  // upgrade handoff the new daemon spawns + writes its own PID to the same
+  // path BEFORE the old daemon's process.on("exit") cleanup fires; a naïve
+  // unlinkSync would delete the new daemon's pid file, breaking any external
+  // tool (susu cli, monitoring scripts) that looks daemon up by pid.
+  const cleanupPid = () => {
+    try {
+      const current = readFileSync(pidPath, "utf8").trim();
+      if (current === ownPid) unlinkSync(pidPath);
+    } catch {
+      // file already gone, or unreadable — nothing to do.
+    }
+  };
   process.on("exit", cleanupPid);
 
+  // Phase 18.2 — periodic live-position monitor. Cheap when there are no open
+  // live positions on the server (just a GET); spawns the user's IDE-agent
+  // every interval when there ARE live positions, so the agent can reconcile
+  // them against the broker MCP and close any the broker has filled out.
+  // Interval is intentionally long (30 min by default) — each tick that hits
+  // the agent costs real money (claude / codex run), and live trades don't
+  // change second-to-second from susurration's perspective. Power users can
+  // tighten via agent-config (cfg.live_monitor_interval_ms). Declared before
+  // gracefulStop so the closure can reference it.
+  const liveMonitor = new LivePositionMonitor(
+    susu,
+    runner,
+    cfg.live_monitor_interval_ms ?? undefined,
+  );
+
+  // Phase 18.2-w — gracefulStop is async + idempotent so the upgrade handoff
+  // (local_server orchestrateHandoff) can AWAIT clean shutdown before
+  // process.exit. Without this, an upgrade-triggered stop returned synchronously
+  // while PaperTrader's in-flight trackPositions tick was still racing — close
+  // decisions made in memory but not yet enqueued got lost when the old
+  // daemon exited. paperTrader.stopTracking + liveMonitor.stop now await any
+  // running tick to fully persist (or skip) before resolving.
   let stopped = false;
+  let stopPromise: Promise<void> | null = null;
   const abortCtl = new AbortController();
-  const gracefulStop = (sig: string) => {
-    if (stopped) return;
+  const gracefulStop = (sig: string): Promise<void> => {
+    if (stopPromise) return stopPromise;
     stopped = true;
     abortCtl.abort();
     process.stderr.write(`\n[daemon] stopping (${sig})\n`);
+    stopPromise = (async () => {
+      const tasks: Promise<unknown>[] = [];
+      if (paperTrader) {
+        try { tasks.push(paperTrader.stopTracking()); } catch (e) {
+          process.stderr.write(`[daemon] paperTrader.stopTracking threw: ${(e as Error)?.message ?? e}\n`);
+        }
+      }
+      try { tasks.push(liveMonitor.stop()); } catch (e) {
+        process.stderr.write(`[daemon] liveMonitor.stop threw: ${(e as Error)?.message ?? e}\n`);
+      }
+      // Hard ceiling so a hung subsystem can't block exit forever. paper
+      // tick should finish in <2s normally (one fetchPrices + a couple of
+      // file writes); live monitor tick can take up to runner.timeout_ms
+      // (90s) if mid-spawn — we cap at 5s and let it die with the process.
+      const HARD_TIMEOUT_MS = 5_000;
+      await Promise.race([
+        Promise.allSettled(tasks),
+        new Promise<void>((resolve) => setTimeout(resolve, HARD_TIMEOUT_MS)),
+      ]);
+      process.stderr.write(`[daemon] graceful shutdown drained\n`);
+    })();
+    return stopPromise;
   };
-  process.on("SIGINT", () => { gracefulStop("SIGINT"); });
-  process.on("SIGTERM", () => { gracefulStop("SIGTERM"); });
+  // Avoid unused-variable lint if `stopped` is only set above.
+  void stopped;
+  process.on("SIGINT", () => { void gracefulStop("SIGINT"); });
+  process.on("SIGTERM", () => { void gracefulStop("SIGTERM"); });
 
-  // Start paper trading position tracker (60s interval).
+  // Phase 17 — local HTTP server for one-click self-upgrade.
+  // Disabled iff cfg.local_server === false. Otherwise starts on 127.0.0.1:7777.
+  if (cfg.local_server !== false && args.config) {
+    startLocalServer(cfg.local_server === undefined ? undefined : cfg.local_server, {
+      bearerToken: cfg.token,
+      configPath: args.config,
+      gracefulStop: async () => { await gracefulStop("UPGRADE"); },
+    });
+  }
+
+  // Start paper trading position tracker (60s interval) + live monitor.
   if (paperTrader) paperTrader.startTracking();
+  liveMonitor.start();
+
+  // Phase 17 — Push config snapshot to backend so the web dashboard's "Agent
+  // state" panel can render real values (provider, execution mode, broker,
+  // size gate) instead of "—". Done on startup + every 30 minutes. Failures
+  // are non-fatal: dashboard will just show stale data until next ping.
+  const daemonStartedAt = new Date().toISOString();
+  async function pingConfigSnapshot() {
+    try {
+      const body = {
+        // Phase 18 — provider is now the IDE-agent runner identity, not an
+        // LLM model name. Daemon doesn't call LLMs directly anymore.
+        provider: cfg.agent_runner.command,
+        // null when paper trading is off — backend renders "—" rather than
+        // showing stale "paper" (G review #3).
+        execution_mode: cfg.paper_trading?.enabled ? "paper" : null,
+        broker_connected: false, // no broker integration in v0.0.x
+        // conv_threshold is set inside the user's CLAUDE.md / agent prompt;
+        // daemon no longer owns it. Always null.
+        conv_threshold: null,
+        // Daemon's `min_size_factor` is the floor below which the daemon won't
+        // open. Backend column name matches this semantic (G review #4).
+        min_size_factor: cfg.paper_trading?.min_size_factor ?? null,
+        daemon_started_at: daemonStartedAt,
+      };
+      await fetch(susu.api_url.replace(/\/$/, "") + "/identity/daemon-ping", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${susu.token}`,
+          "content-type": "application/json",
+          "user-agent": `susurration-agent-daemon/${DAEMON_VERSION}`,
+        },
+        body: JSON.stringify(body),
+      });
+    } catch { /* non-fatal */ }
+  }
+  pingConfigSnapshot();
+  const configPingInterval = setInterval(pingConfigSnapshot, 30 * 60 * 1000);
+  process.on("exit", () => clearInterval(configPingInterval));
 
   // Reconnect loop: same exponential backoff pattern as cli watch.
   let backoffMs = 1000;
@@ -335,7 +496,7 @@ async function main(): Promise<number> {
   while (!stopped) {
     const startedAt = Date.now();
     try {
-      await runOneStream(susu, provider, log, limiter, cfg, myAddress, paperTrader, abortCtl.signal);
+      await runOneStream(susu, runner, log, limiter, cfg, myAddress, myHandle, paperTrader, abortCtl.signal);
     } catch (err) {
       if (stopped) break;
       const msg = (err as Error)?.message ?? String(err);
@@ -350,8 +511,9 @@ async function main(): Promise<number> {
     backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF);
   }
 
-  // Cleanup.
-  if (paperTrader) paperTrader.stopTracking();
+  // Cleanup. await so any in-flight tick finishes before we return — this
+  // path is the natural stream-end (rare; usually SIGINT/SIGTERM beats it).
+  if (paperTrader) await paperTrader.stopTracking();
   return 0;
 }
 
@@ -388,11 +550,12 @@ function loadAlreadyProcessedIds(decisionLogPath?: string): Set<string> {
 
 async function runOncePoll(
   susu: SusuClientConfig,
-  provider: LLMProvider,
+  runner: IdeAgentRunner,
   log: DecisionLog,
   limiter: MinuteRateLimiter,
   cfg: DaemonConfig,
   myAddress: string | null,
+  myHandle: string | null,
   paperTrader: PaperTrader | null,
 ): Promise<number> {
   const state = await loadState(cfg.state_path!);
@@ -432,7 +595,7 @@ async function runOncePoll(
 
   for (const evt of actionable) {
     try {
-      await handleEvent(evt, susu, provider, log, limiter, cfg, paperTrader);
+      await handleEvent(evt, susu, runner, log, limiter, cfg, myHandle, paperTrader);
     } catch (err) {
       process.stderr.write(`[daemon] handle error on ${evt.signal_id ?? evt.reaction_id ?? "?"}: ${(err as Error)?.message ?? err}\n`);
     }
@@ -457,26 +620,19 @@ async function runOncePoll(
 // Shared across handleEvent calls within a stream session. When the user's
 // LLM API key is wrong, every event triggers a 401 — we detect the pattern
 // and pause with a loud banner instead of silently burning through errors.
-const LLM_AUTH_PAUSE_THRESHOLD = 3;
-const LLM_AUTH_PAUSE_SECONDS = 300;  // 5 min cooldown between retries
-let llmAuthErrorCount = 0;
-let llmAuthPausedUntil = 0;
-
-function isLlmAuthError(msg: string): boolean {
-  return /\b(401|403|Incorrect API key|invalid.*api.?key|authentication|unauthorized)\b/i.test(msg);
-}
-
-function isLlmQuotaError(msg: string): boolean {
-  return /\b(429|quota|rate.?limit|exceeded.*quota|billing)\b/i.test(msg);
-}
+// Phase 18 — Auth pause logic deleted with LLM SDK. The IDE-agent CLI
+// handles its own auth (Claude subscription / Codex login / etc.), and
+// when it fails the daemon sees a non-zero exit code which is logged
+// per-event without global pause semantics.
 
 async function runOneStream(
   susu: SusuClientConfig,
-  provider: LLMProvider,
+  runner: IdeAgentRunner,
   log: DecisionLog,
   limiter: MinuteRateLimiter,
   cfg: DaemonConfig,
   myAddress: string | null,
+  myHandle: string | null,
   paperTrader: PaperTrader | null,
   signal?: AbortSignal,
 ): Promise<void> {
@@ -550,7 +706,7 @@ async function runOneStream(
         continue;
       }
 
-      handleEvent(evt, susu, provider, log, limiter, cfg, paperTrader).then(() => {
+      handleEvent(evt, susu, runner, log, limiter, cfg, myHandle, paperTrader).then(() => {
         // After successful decision, mark both IDs so subsequent
         // reactions to the same signal are skipped.
         if (evt.signal_id) processed.add(evt.signal_id);
@@ -567,10 +723,11 @@ const SIGNAL_EXPIRY_MS = 60 * 60 * 1000; // 1 hour
 async function handleEvent(
   evt: any,
   susu: SusuClientConfig,
-  provider: LLMProvider,
+  runner: IdeAgentRunner,
   log: DecisionLog,
   limiter: MinuteRateLimiter,
   cfg: DaemonConfig,
+  myHandle: string | null,
   paperTrader: PaperTrader | null,
 ): Promise<void> {
   const decisionStartedAt = Date.now();
@@ -621,150 +778,101 @@ async function handleEvent(
     history = r.signals ?? [];
   } catch { /* if history fetch fails, run with empty context */ }
 
-  const ctx: AgentContext = {
+  const inv: RunnerInvocation = {
     recent_events: history,
     channel_label: channelLabel,
     triggering_event: evt,
-    my_handle: null,  // filled by main(); could thread through but UI shows from_username already
+    my_handle: myHandle,
   };
 
-  // ── LLM auth error cooldown ──────────────────────────────────────────
-  if (llmAuthPausedUntil > Date.now()) {
-    // Silently skip — banner already printed, waiting for cooldown.
-    reportDaemonDecision(susu, { kind: "error", error_type: "llm_paused", event_kind: evt.kind });
-    return;
-  }
-
-  let decision: AgentDecision;
-  let stats;
+  // Phase 18 — dispatch to the user's IDE-agent CLI. The agent acts via
+  // the @susurration/mcp tools it has mounted; this daemon process just
+  // spawns + waits. Cost / auth / quota are the IDE-agent's concern, not
+  // ours. Any non-zero exit is logged per-event without global pause.
+  let runResult: RunnerResult;
   try {
-    const out = await provider.decide(ctx, cfg.agent.system_prompt);
-    decision = out.decision;
-    stats = out.stats;
-    // Success → reset auth error counter.
-    if (llmAuthErrorCount > 0) {
-      process.stderr.write(`[daemon] ✅ LLM recovered after ${llmAuthErrorCount} auth errors\n`);
-      llmAuthErrorCount = 0;
-    }
+    runResult = await runner.invoke(inv);
   } catch (err) {
     const msg = (err as Error)?.message ?? String(err);
-    process.stderr.write(`[daemon] LLM error: ${msg}\n`);
-    reportClientError(susu, "llm_error", msg, { provider: cfg.llm.provider ?? "unknown" });
-
-    if (isLlmAuthError(msg)) {
-      llmAuthErrorCount++;
-      if (llmAuthErrorCount >= LLM_AUTH_PAUSE_THRESHOLD) {
-        process.stderr.write(`\n${"═".repeat(60)}\n`);
-        process.stderr.write(`  ❌ LLM API KEY ERROR — ${llmAuthErrorCount} consecutive failures\n\n`);
-        process.stderr.write(`  Your LLM API key is invalid or expired.\n`);
-        process.stderr.write(`  Daemon will pause LLM calls for ${LLM_AUTH_PAUSE_SECONDS / 60} minutes.\n\n`);
-        process.stderr.write(`  To fix:\n`);
-        process.stderr.write(`    1. Check your API key at your LLM provider's dashboard\n`);
-        process.stderr.write(`    2. Update ~/.susu/agent-config.json → llm.api_key\n`);
-        process.stderr.write(`    3. Restart the daemon\n`);
-        process.stderr.write(`${"═".repeat(60)}\n\n`);
-        llmAuthPausedUntil = Date.now() + LLM_AUTH_PAUSE_SECONDS * 1000;
-      }
-    } else if (isLlmQuotaError(msg)) {
-      process.stderr.write(`\n${"═".repeat(60)}\n`);
-      process.stderr.write(`  ⚠️  LLM QUOTA EXCEEDED\n\n`);
-      process.stderr.write(`  Your LLM API quota is exhausted. Check your billing at\n`);
-      process.stderr.write(`  your provider's dashboard. Daemon will retry in ${LLM_AUTH_PAUSE_SECONDS / 60} min.\n`);
-      process.stderr.write(`${"═".repeat(60)}\n\n`);
-      llmAuthPausedUntil = Date.now() + LLM_AUTH_PAUSE_SECONDS * 1000;
-    }
-    const errType = isLlmAuthError(msg) ? "llm_auth_error" : isLlmQuotaError(msg) ? "llm_quota_error" : "llm_error";
+    process.stderr.write(`[daemon] runner spawn failed: ${msg}\n`);
+    reportClientError(susu, "runner_error", msg, { runner: cfg.agent_runner.command });
     reportDaemonDecision(susu, {
       kind: "error",
-      error_type: errType,
+      error_type: "runner_spawn_failed",
       event_kind: evt.kind,
       latency_ms: Date.now() - decisionStartedAt,
-      context: { provider: cfg.llm.provider ?? "unknown" },
+      context: { runner: cfg.agent_runner.command },
     });
     return;
   }
 
-  // Execute the decision.
-  let result: { id: string; cost_usd: number } | undefined;
-  let error: string | undefined;
-  try {
-    if (decision.kind === "react") {
-      const r = await pushReaction(susu, decision.signal_id, decision.payload, true);
-      result = { id: r.reaction_id, cost_usd: r.cost_usd };
-    } else if (decision.kind === "push") {
-      if (cfg.dry_run_pushes) {
-        error = "dry_run_pushes=true — push decision NOT executed (would have posted to channel)";
-      } else {
-        const r = await pushSignal(susu, decision.channel_id, decision.payload);
-        result = { id: r.signal_id, cost_usd: r.cost_usd };
-      }
-    }
-    // noop → nothing to execute
-  } catch (err) {
-    error = (err as Error)?.message ?? String(err);
+  if (!runResult.ok) {
+    process.stderr.write(
+      `[daemon] runner exit=${runResult.exit_code} dur=${runResult.duration_ms}ms\n` +
+      `         stderr: ${runResult.stderr_tail.slice(-400)}\n`,
+    );
+    reportClientError(susu, "runner_error",
+      `exit ${runResult.exit_code}: ${runResult.stderr_tail.slice(-200)}`,
+      { runner: cfg.agent_runner.command },
+    );
+    reportDaemonDecision(susu, {
+      kind: "error",
+      error_type: runResult.exit_code == null ? "runner_timeout" : "runner_failed",
+      event_kind: evt.kind,
+      latency_ms: runResult.duration_ms,
+      context: { runner: cfg.agent_runner.command, exit_code: String(runResult.exit_code) },
+    });
+    return;
   }
 
-  await log.log({ ctx, decision, stats, result, error });
+  // Log the invocation. The actual decision (react / push / noop) lives in
+  // the backend now — the IDE-agent acted directly via susu_* MCP tools.
+  // Daemon records "invocation done" with prompt + stdout for audit.
+  await log.log({
+    triggering_event: evt,
+    invocation: {
+      runner: cfg.agent_runner.command,
+      duration_ms: runResult.duration_ms,
+      exit_code: runResult.exit_code,
+    },
+    stdout_tail: runResult.stdout_tail.slice(-1000),
+  });
 
-  // Fire-and-forget decision telemetry — lets backend distinguish
-  // "silent daemon" (running but all noop) vs "dead daemon" (not connected).
-  // Phase 11b — also writes plaintext to /daemon_decisions for cross-device
-  // user-visible decision history.
-  // Phase 15 — reasoning_summary OPT-OUT (default TRUE per Haze product decision).
-  // Set cfg.share_reasoning_summary = false to keep LLM note fully local.
-  // Default behavior: daemon uploads note (capped 500 chars + secrets redacted
-  // server-side) so dashboard shows decision history on any device.
-  const shareReasoning = cfg.share_reasoning_summary !== false;  // default true
-  const decisionAny = decision as any;
-  const reasoningSummary: string | undefined = shareReasoning
-    ? (typeof decisionAny?.payload?.note === "string" ? decisionAny.payload.note :
-       typeof decisionAny?.note === "string" ? decisionAny.note :
-       typeof decisionAny?.reasoning === "string" ? decisionAny.reasoning :
-       undefined)
-    : undefined;
-  const reactionId = (result as any)?.reaction_id ?? undefined;
+  // Decision telemetry for cross-device visibility. We can't introspect what
+  // the IDE-agent decided locally — its action shows up on the backend via
+  // /signals/:id/reactions or /channels/:id/signals (whichever it called).
+  // Mark this as `invoke` kind so the dashboard knows the daemon dispatched
+  // an event even when the agent chose to do nothing.
   reportDaemonDecision(susu, {
-    kind: error ? "error" : decision.kind,
-    signal_id: decision.kind === "react" ? decision.signal_id :
-               (evt.kind === "signal" && (evt as any).signal_id) ? (evt as any).signal_id : undefined,
+    kind: "invoke",
+    signal_id: evt.kind === "signal" ? (evt as any).signal_id : undefined,
     channel_id: (evt as any).channel_id,
-    reaction_id: reactionId,
     event_kind: evt.kind,
-    error_type: error ? "execute_failed" : undefined,
-    latency_ms: Date.now() - decisionStartedAt,
-    llm_provider: cfg.llm.provider,
-    llm_model: cfg.llm.model,
-    reasoning_summary: reasoningSummary,  // undefined when opt-out
+    latency_ms: runResult.duration_ms,
     context: {
-      provider: cfg.llm.provider ?? "unknown",
-      model: cfg.llm.model ?? "unknown",
+      runner: cfg.agent_runner.command,
+      exit_code: String(runResult.exit_code),
     },
   });
 
-  // Built-in paper trading (in-process, zero overhead).
-  // When the trigger is a reaction, paper trader needs the original signal's
-  // payload (token, entry_price, sl, tp, etc.), not the reaction's payload.
-  if (paperTrader && !error) {
-    let signalPayload: Record<string, unknown> | undefined;
-    if (evt.kind === "reaction" && evt.signal_id && history.length > 0) {
-      // Channel history API (/channels/{id}/signals) only returns signals
-      // (no reactions) and omits the `kind` field — match by signal_id only.
-      const orig = history.find((h: any) => h.signal_id === evt.signal_id);
-      if (orig?.payload && typeof orig.payload === "object") {
-        const { payload: normalized } = normalizeSignalPayload(orig.payload as Record<string, unknown>);
-        signalPayload = normalized;
-      }
-    }
-    paperTrader.onDecision(decision, evt, signalPayload);
-  }
+  // Phase 18.2 — auto-open is server-atomic now. When the agent calls
+  // susu_signal_accept (mcp-adapter), backend's /signals/:id/accept handler
+  // writes the reaction row AND the positions row in one transaction. The
+  // daemon does not need to react to its own decisions; paperTrader still
+  // owns the close side (SL / TP / trailing / time stop on the local price
+  // feed, mirroring closes to /positions/close). paperTrader.syncFromServer
+  // pulls newly-opened positions on the next track tick so price tracking
+  // engages without any extra wiring here.
+  void paperTrader;
 
   // Optional on_decision hook for power users bridging external systems.
   // Fire-and-forget: daemon does not wait. Timeout kills after 30s.
   if (cfg.on_decision) {
     try {
       const hookPayload = JSON.stringify({
-        decision, trigger: evt,
-        result: result ?? null, error: error ?? null, stats: stats ?? null,
+        invocation: { runner: cfg.agent_runner.command, exit_code: runResult.exit_code, duration_ms: runResult.duration_ms },
+        trigger: evt,
+        stdout_tail: runResult.stdout_tail.slice(-400),
       });
       const child = spawn("sh", ["-c", cfg.on_decision], {
         stdio: ["pipe", "ignore", "pipe"],

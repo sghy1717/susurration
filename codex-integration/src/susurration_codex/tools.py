@@ -192,9 +192,17 @@ TOOLS: list[dict[str, Any]] = [
             "additionalProperties": False,
         },
     }},
+    # Phase 18.2 — `susu_signal_react` was split into `susu_signal_accept` /
+    # `susu_signal_reject` / `susu_position_close` over in mcp-adapter
+    # (TypeScript). The Python `susurration` SDK that this codex-integration
+    # wraps does not yet expose accept/reject/close methods, so we keep the
+    # legacy `susu_signal_react` tool here for backwards compatibility with
+    # existing Codex agent prompts. Codex users who want the new atomic
+    # accept-and-open behaviour should switch to the @susurration/mcp adapter
+    # until this Python SDK catches up. Tracked: TODO codex-integration parity.
     {"type": "function", "function": {
         "name": "susu_signal_react",
-        "description": "React to a peer's signal. is_auto=true means agent acted autonomously; false means user-directed.",
+        "description": "React to a peer's signal. is_auto=true means agent acted autonomously; false means user-directed. (Codex-integration only — TypeScript mcp-adapter has split this into accept/reject/close; this Python adapter will follow in a later release.)",
         "parameters": {
             "type": "object",
             "properties": {

@@ -10,9 +10,10 @@
 //
 // Writes to ~/.susu/paper_trades.json.
 
-import { readFileSync, writeFileSync, appendFileSync, mkdirSync } from "node:fs";
-import { syncPaperOpen, syncPaperClose, fetchPaperPositionsMine, type SusuClientConfig } from "./susu_actions.ts";
-import { dirname } from "node:path";
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, renameSync } from "node:fs";
+import { syncPaperOpen, fetchPaperPositionsMine, type SusuClientConfig } from "./susu_actions.ts";
+import { dirname, join } from "node:path";
+import { PaperCloseQueue, type ClosePayload } from "./paper_close_queue.ts";
 
 // ── Default strategy constants ──────────────────────────────────────────
 const DEFAULT_LEVERAGE = 3;
@@ -82,6 +83,15 @@ async function fetchPrices(symbols: Set<string>): Promise<Map<string, number>> {
 
 export class PaperTrader {
   private trackTimer: ReturnType<typeof setInterval> | null = null;
+  /** Phase 18.2-w — promise for the currently-running trackPositions tick,
+   *  so shutdown can wait for it. Without this, a SIGTERM during a tick
+   *  (mid fetchPrices, before saveBook/enqueue) loses the close decision
+   *  the tick had already made in memory. */
+  private inFlightTick: Promise<void> | null = null;
+  /** Phase 17.5 — persistent retry queue for close mirror calls. Survives
+   *  daemon crashes and network blips so positions on server reaches
+   *  closed_at = NOT NULL for every locally-closed trade. */
+  closeQueue: PaperCloseQueue;
 
   constructor(
     private tradesPath: string,
@@ -93,61 +103,113 @@ export class PaperTrader {
     private susuClient?: SusuClientConfig | null,
   ) {
     mkdirSync(dirname(tradesPath), { recursive: true });
+    // Queue file lives next to paper_trades.json (~/.susu/paper_close_queue.json).
+    this.closeQueue = new PaperCloseQueue(
+      join(dirname(tradesPath), "paper_close_queue.json"),
+      susuClient ?? null,
+    );
   }
 
-  /** Phase 11a — On startup, pull server-side open positions and merge into
-   *  local book. Useful after daemon reinstall / new device — server is
-   *  cross-device source of truth for visibility. Local PaperTrade.id stays
-   *  as daemon's sequential counter; signal_id is the dedup key.
+  /** Phase 11a + Phase 17.5 — On startup, pull server-side positions (BOTH
+   *  open and closed) and merge into local book. Useful after daemon reinstall
+   *  / new device — server is cross-device source of truth for visibility.
    *
-   *  Fire-and-forget: failures don't block daemon startup. */
+   *  Conflict resolution (server-overrides-local for close state):
+   *  - server says closed → local must reflect closed (entire trade overwritten
+   *    from server row, including exit_price / pnl). server is truth.
+   *  - server says open + local says open → no-op.
+   *  - server has row that local doesn't → add it.
+   *  - local has row that server doesn't → keep local (server may have purged
+   *    or daemon's close-queue still has pending mirror). Defensive.
+   *
+   *  Caller MUST await this before startTracking() — otherwise trackPositions
+   *  may tick before we've merged server state and miss server-truth opens.
+   *  Fire-and-forget on failure: returns silently so daemon startup isn't
+   *  blocked by network blip. */
   async syncFromServerOnce(): Promise<void> {
     if (!this.susuClient) return;
     try {
-      const remote = await fetchPaperPositionsMine(this.susuClient, "open");
+      // Pull both open + closed in one shot. Server caps limit=500 (Phase 11a).
+      const remote = await fetchPaperPositionsMine(this.susuClient, "all");
       if (!remote.positions || remote.positions.length === 0) return;
       const book = this.loadBook();
-      const localSignalIds = new Set(book.trades.map((t) => t.signal_id));
+      const localByKey = new Map(book.trades.map((t) => [t.signal_id, t]));
       let added = 0;
+      let overwritten = 0;
+
       for (const r of remote.positions) {
-        if (!r.signal_id || localSignalIds.has(r.signal_id)) continue;
-        // Reconstruct local PaperTrade from server row.
-        const id = String(book.trades.length + 1 + added).padStart(3, "0");
-        book.trades.push({
-          id,
-          token: r.token,
-          direction: r.direction,
-          leverage: r.leverage,
-          position_pct: 0,  // not persisted server-side; safe default
-          position_usd: r.position_usd,
-          notional_usd: r.position_usd * r.leverage,
-          entry_price: r.entry_price,
-          stop_loss: r.stop_loss,
-          take_profit: r.take_profit,
-          time_stop_hours: DEFAULT_TIME_STOP_HOURS,
-          trailing_activate_pct: DEFAULT_TRAILING_ACTIVATE,
-          trailing_giveback_pct: DEFAULT_TRAILING_GIVEBACK,
-          best_pnl_pct: 0,
-          size_factor: r.size_factor ?? 0.7,
-          peer: r.peer_username ? `@${r.peer_username}` : "@?",
-          signal_id: r.signal_id,
-          opened_at: r.opened_at ?? new Date().toISOString(),
-          exit_price: null,
-          exit_time: null,
-          exit_reason: null,
-          pnl_pct: null,
-          pnl_usd: null,
-          status: "open",
-        });
-        added++;
+        if (!r.signal_id) continue;
+        const isClosed = !!r.closed_at;
+        const local = localByKey.get(r.signal_id);
+
+        if (!local) {
+          // Server has row local doesn't — add it (preserve closed/open state).
+          // ID = current length + 1 (after push it becomes index of new row).
+          book.trades.push(this.materializeFromServer(r, isClosed, book.trades.length + 1));
+          added++;
+          continue;
+        }
+
+        if (isClosed && local.status === "open") {
+          // Server-overrides-local: server already saw close that local missed
+          // (likely a different daemon instance / device closed it). Overwrite
+          // local trade with server-truth close fields. We don't fire local
+          // close-event log because the close happened "elsewhere".
+          local.status = "closed";
+          local.exit_price = r.exit_price ?? null;
+          local.exit_time = r.closed_at ?? null;
+          local.exit_reason = r.exit_reason ?? null;
+          local.pnl_pct = r.exit_pnl_pct ?? null;
+          local.pnl_usd = r.exit_pnl_usd ?? null;
+          overwritten++;
+        }
+        // server-open + local-open: no-op
+        // server-open + local-closed: local has fresher close intent, don't
+        //   roll back; close-queue should be syncing it shortly anyway.
+        // server-closed + local-closed: no-op
       }
-      if (added > 0) {
+
+      if (added > 0 || overwritten > 0) {
         this.saveBook(book);
-        process.stderr.write(`[paper] synced ${added} open position(s) from server\n`);
+        process.stderr.write(
+          `[paper] server sync: added=${added}, overwritten=${overwritten} of ${remote.positions.length} remote\n`,
+        );
+      } else {
+        process.stderr.write(`[paper] server sync: ${remote.positions.length} remote, all already local\n`);
       }
     } catch (err) {
       process.stderr.write(`[paper] server sync failed (non-fatal): ${(err as Error)?.message ?? err}\n`);
     }
+  }
+
+  /** Build a local PaperTrade from a server positions row. */
+  private materializeFromServer(r: any, isClosed: boolean, idCounter: number): PaperTrade {
+    return {
+      id: String(idCounter).padStart(3, "0"),
+      token: r.token,
+      direction: r.direction,
+      leverage: r.leverage,
+      position_pct: 0,
+      position_usd: r.position_usd ?? 0,
+      notional_usd: (r.position_usd ?? 0) * (r.leverage ?? 1),
+      entry_price: r.entry_price,
+      stop_loss: r.stop_loss,
+      take_profit: r.take_profit,
+      time_stop_hours: DEFAULT_TIME_STOP_HOURS,
+      trailing_activate_pct: DEFAULT_TRAILING_ACTIVATE,
+      trailing_giveback_pct: DEFAULT_TRAILING_GIVEBACK,
+      best_pnl_pct: 0,
+      size_factor: r.size_factor ?? 0.7,
+      peer: r.peer_username ? `@${r.peer_username}` : "@?",
+      signal_id: r.signal_id,
+      opened_at: r.opened_at ?? new Date().toISOString(),
+      exit_price: isClosed ? (r.exit_price ?? null) : null,
+      exit_time: isClosed ? (r.closed_at ?? null) : null,
+      exit_reason: isClosed ? (r.exit_reason ?? null) : null,
+      pnl_pct: isClosed ? (r.exit_pnl_pct ?? null) : null,
+      pnl_usd: isClosed ? (r.exit_pnl_usd ?? null) : null,
+      status: isClosed ? "closed" : "open",
+    };
   }
 
   private emitEvent(evt: Record<string, unknown>): void {
@@ -158,17 +220,43 @@ export class PaperTrader {
   }
 
   /** Start the position tracking loop. Call once from daemon main(). */
-  startTracking(): void {
-    // Immediate first check, then periodic.
-    this.trackPositions();
-    this.trackTimer = setInterval(() => this.trackPositions(), TRACK_INTERVAL_MS);
+  /** Wrap trackPositions so concurrent ticks don't overlap (the 60s interval
+   *  could otherwise stack ticks if fetchPrices is slow) AND so shutdown can
+   *  await the running tick before exiting. */
+  private async runTickGuarded(): Promise<void> {
+    if (this.inFlightTick) {
+      // A previous tick is still going (fetchPrices slow / server slow).
+      // Skip this tick — the next interval will pick up. Better than racing
+      // two ticks against the same open positions.
+      return;
+    }
+    this.inFlightTick = this.trackPositions().catch((err) => {
+      process.stderr.write(`[paper] trackPositions tick error: ${(err as Error)?.message ?? err}\n`);
+    }).finally(() => {
+      this.inFlightTick = null;
+    });
+    await this.inFlightTick;
   }
 
-  /** Stop the tracking loop (for graceful shutdown). */
-  stopTracking(): void {
+  startTracking(): void {
+    // Immediate first check, then periodic. Both paths route through the
+    // guarded wrapper so shutdown can await whatever is currently running.
+    void this.runTickGuarded();
+    this.trackTimer = setInterval(() => { void this.runTickGuarded(); }, TRACK_INTERVAL_MS);
+  }
+
+  /** Stop the tracking loop (for graceful shutdown). Phase 18.2-w —
+   *  returns a promise that resolves only after the in-flight tick (if any)
+   *  finishes. Critical for upgrade handoff: a tick mid-fetchPrices that
+   *  was about to write closes had its work lost when stopTracking just
+   *  cleared the interval and returned. Now the caller awaits us instead. */
+  async stopTracking(): Promise<void> {
     if (this.trackTimer) {
       clearInterval(this.trackTimer);
       this.trackTimer = null;
+    }
+    if (this.inFlightTick) {
+      try { await this.inFlightTick; } catch { /* already logged inside guard */ }
     }
   }
 
@@ -397,14 +485,17 @@ export class PaperTrader {
           best_pnl_pct: t.best_pnl_pct,
           peer: t.peer,
         });
-        // Phase 11a — mirror close to server.
+        // Phase 11a + Phase 17.5 — mirror close to server via persistent
+        // retry queue. flushQueue() at end of trackPositions() will attempt
+        // delivery; failures stay in queue with exponential backoff. Never
+        // silently drop a close.
         if (this.susuClient && t.signal_id) {
-          syncPaperClose(this.susuClient, {
+          this.closeQueue.enqueue({
             signal_id: t.signal_id,
             exit_reason: reason,
             exit_price: price,
             exit_pnl_pct: t.pnl_pct,
-            exit_pnl_usd: pnlUsd,
+            exit_pnl_usd: pnlUsd ?? undefined,
             closed_at: t.exit_time ?? new Date().toISOString(),
           });
         }
@@ -412,6 +503,17 @@ export class PaperTrader {
     }
 
     if (dirty) this.saveBook(book);
+
+    // Phase 17.5 — flush queue at end of every tick. New closes just enqueued
+    // get their first attempt immediately; stale entries get retried on schedule.
+    if (this.susuClient) {
+      const r = await this.closeQueue.flush();
+      if (r.ok > 0 || r.failed > 0 || r.stale > 0) {
+        process.stderr.write(
+          `[paper] close queue flush: ok=${r.ok} failed=${r.failed} stale=${r.stale}\n`,
+        );
+      }
+    }
   }
 
   private getBalance(book: PaperBook): number {
@@ -431,6 +533,17 @@ export class PaperTrader {
   }
 
   private saveBook(book: PaperBook): void {
-    writeFileSync(this.tradesPath, JSON.stringify(book, null, 2));
+    // Atomic write: serialize to a sibling .tmp first, then rename onto the
+    // real path. POSIX rename is atomic within a filesystem, so a kill mid-
+    // write (SIGKILL during upgrade handoff, OS crash, OOM) leaves either
+    // the old book or the new book on disk — never a half-written one.
+    // PaperCloseQueue uses the same pattern (close_queue.ts:writeQueue).
+    // Why this matters: the previous direct writeFileSync could leave
+    // paper_trades.json truncated to "" or {"trades":[... half-JSON, after
+    // which loadBook's JSON.parse throws and the catch fell back to an
+    // empty book — every prior trade silently lost. Phase 18.2-w fix.
+    const tmp = `${this.tradesPath}.tmp`;
+    writeFileSync(tmp, JSON.stringify(book, null, 2));
+    renameSync(tmp, this.tradesPath);
   }
 }

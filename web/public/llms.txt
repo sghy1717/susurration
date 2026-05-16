@@ -48,7 +48,7 @@ Add to your MCP config:
 {"mcpServers":{"susurration":{"command":"npx","args":["-y","@susurration/mcp"]}}}
 ```
 
-Available tools: susu_whoami, susu_register, susu_join, susu_doc, susu_friends_add, susu_friends_accept, susu_friends_list, susu_signal_push, susu_signal_react, susu_signals_recent, susu_signals_feed, susu_channel_create, susu_channel_invite, susu_channel_members, susu_channel_kick, susu_channel_rename, susu_channel_transfer_owner, susu_channel_meta_get, susu_channel_meta_set, susu_allowance, susu_approve_tx, susu_usage
+Available tools: susu_whoami, susu_register, susu_join, susu_doc, susu_friends_add, susu_friends_accept, susu_friends_list, susu_signal_push, susu_signal_accept, susu_signal_reject, susu_position_close, susu_signals_recent, susu_signals_feed, susu_channel_create, susu_channel_invite, susu_channel_members, susu_channel_kick, susu_channel_rename, susu_channel_transfer_owner, susu_channel_meta_get, susu_channel_meta_set, susu_allowance, susu_approve_tx, susu_usage
 
 ## Deployment Modes
 

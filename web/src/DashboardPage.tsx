@@ -202,6 +202,12 @@ interface Position {
   /** v4 — replay signal opened a dry-run position. Visually separated and
    *  excluded from totalPnl / totalCapital aggregates. */
   isReplay?: boolean;
+  /** Phase 17.5 — row was inserted by historical backfill script (pre-Phase-11a
+   *  daemons didn't sync to paper_positions, so entry context was reconstructed
+   *  by JOIN with signals.payload). position_usd is 0 (unrecoverable) and
+   *  leverage may be a fallback default. Dashboard renders these with an
+   *  "*历史推断*" / "*inferred*" tag and excludes from totals. */
+  isBackfilled?: boolean;
 }
 
 function normalizeSignalPayload(p: any): {
@@ -289,6 +295,19 @@ function applyPrices(
   persistedCloses: Map<string, CloseRecord>,
 ): { positions: Position[] } {
   const result = positions.map(pos => {
+    // Phase 17.5 bug fix — server-truth respect: a position that already
+    // came back from the server with status="closed" must NOT be reclassified
+    // by the client's SL/TP/Time evaluator. Earlier code's fallthrough at
+    // the bottom of this function unconditionally set status="open", which
+    // turned every closed backfilled position into an "open" one whenever
+    // the time-stop window happened to be < 48h (because opened_at on
+    // backfilled rows was off — separate bug). Either way: closed-from-
+    // server stays closed, full stop. Only enrich with current price for
+    // display.
+    if (pos.status === "closed") {
+      return { ...pos, currentPrice: prices[pos.token] };
+    }
+
     const stored = persistedCloses.get(pos.signalId);
     if (stored) {
       const cp = prices[pos.token];
@@ -644,8 +663,8 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
           if (testTickRef.current) window.clearInterval(testTickRef.current);
           setTestStage("fail");
           setTestFailReason(lang === "zh"
-            ? "等待 90 秒未收到 agent 反应。请确认 installer 跑完 + IDE 完全重启过 + LLM key 正常。"
-            : "No agent reaction after 90s. Check: installer ran clean, IDE fully restarted, LLM key valid.");
+            ? "等到 90 秒上限仍未收到 agent 反应。检查：① installer 跑完 + IDE 完全重启过 ② `claude -p` 或你配的 runner 在 shell 里能跑 ③ `claude mcp list` 里能看到 susurration。（90 秒是上限，agent 一般 5-30 秒就反应）"
+            : "Hit the 90s ceiling without a reaction. Check: ① installer ran clean + IDE fully restarted ② `claude -p` (or your configured runner) works from your shell ③ susurration appears in `claude mcp list`. (90s is the cap — agents usually react in 5-30s.)");
           fireOnboardingEvent("connectivity_test_result", { result: "fail", context: { stage: "timeout", elapsed_sec: String(Math.floor(elapsedSec)) } });
           return;
         }
@@ -791,17 +810,12 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
             <ul style={{ listStyle: "none", padding: 0, margin: 0, fontSize: 12, lineHeight: 1.8 }}>
               <li>✓ {lang === "zh" ? "钱包已签名" : "Wallet signed"} <span style={{ color: "var(--green)" }}>✓</span></li>
               <li>
-                {lang === "zh" ? "已装 AI IDE：" : "An AI IDE installed: "}
-                Claude Code · Cursor · Windsurf · Cline · Codex
-                <span style={{ color: "var(--ink-faint)", fontSize: 11 }}> ({lang === "zh" ? "任一" : "any one"})</span>
-              </li>
-              <li>
-                {lang === "zh" ? "已有 LLM API key：" : "An LLM API key: "}
-                <a href="https://console.anthropic.com" target="_blank" rel="noopener noreferrer" style={{ color: "var(--blue, #3b82f6)" }}>Anthropic</a>
-                <span style={{ color: "var(--ink-faint)" }}> {lang === "zh" ? "或" : "or"} </span>
-                <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" style={{ color: "var(--blue, #3b82f6)" }}>OpenAI</a>
+                {lang === "zh" ? "已装 AI IDE 的 CLI：" : "An AI IDE with a CLI: "}
+                Claude Code <span style={{ color: "var(--ink-faint)" }}> {lang === "zh" ? "或" : "or"} </span>Codex CLI
                 <div style={{ fontSize: 10, color: "var(--ink-faint)", marginTop: 2 }}>
-                  {lang === "zh" ? "Installer 会自动读 ANTHROPIC_API_KEY / OPENAI_API_KEY 环境变量" : "Installer auto-reads ANTHROPIC_API_KEY / OPENAI_API_KEY env vars"}
+                  {lang === "zh"
+                    ? "Susurration 把每条信号交给你本地的 agent 来决策。它带着你的 CLAUDE.md、MCP servers、skills、记忆 — 这才是 你的 agent，不是裸大模型。不需要单独的 LLM API key。"
+                    : "Susurration delegates every signal to your local agent — running with your CLAUDE.md, MCP servers, skills, memory. That's YOUR agent, not a naked LLM. No separate API key needed."}
                 </div>
               </li>
             </ul>
@@ -944,8 +958,8 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
                 </div>
                 <div style={{ fontSize: 10, color: "var(--ink-faint)", lineHeight: 1.6 }}>
                   {lang === "zh"
-                    ? "如果迟迟没反应，最常见原因：① IDE 没完全重启 ② LLM key 没在 env 里（installer 会读 ANTHROPIC_API_KEY / OPENAI_API_KEY）③ daemon 进程 crash（看 ~/.susu/agent-decisions.jsonl）"
-                    : "Common stalls: ① IDE not fully restarted ② LLM key not in env (installer reads ANTHROPIC_API_KEY / OPENAI_API_KEY) ③ daemon crashed (check ~/.susu/agent-decisions.jsonl)"
+                    ? "如果迟迟没反应，最常见原因：① IDE 没完全重启（MCP 只在启动时加载）② 你的 IDE-agent CLI 没在 PATH 里（试 `which claude`）③ daemon 进程 crash（看 ~/.susu/agent-decisions.jsonl）"
+                    : "Common stalls: ① IDE not fully restarted (MCP loads on startup only) ② your IDE-agent CLI is not on PATH (try `which claude`) ③ daemon crashed (check ~/.susu/agent-decisions.jsonl)"
                   }
                 </div>
               </div>
@@ -1030,6 +1044,11 @@ function semverLT(a: string, b: string): boolean {
   return false;
 }
 
+// Phase 17 — daemon's local HTTP server (loopback only).
+const DAEMON_LOCAL_BASE = "http://127.0.0.1:7777";
+
+type UpgradeState = "idle" | "probing" | "upgrading" | "polling" | "done" | "error";
+
 function UpgradeBanner() {
   const { lang } = useLang();
   const auth = useAuth();
@@ -1037,6 +1056,10 @@ function UpgradeBanner() {
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [dismissed, setDismissed] = useState(false);
+  // Phase 17 — one-click upgrade state
+  const [oneClickReady, setOneClickReady] = useState<boolean | null>(null);
+  const [upgradeState, setUpgradeState] = useState<UpgradeState>("idle");
+  const [upgradeError, setUpgradeError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!auth.token) return;
@@ -1052,31 +1075,191 @@ function UpgradeBanner() {
     return () => { cancelled = true; };
   }, [auth.token]);
 
-  const showBanner =
-    !dismissed &&
+  // Phase 17 — probe local daemon HTTP server to decide one-click vs copy-command path.
+  // Only probes when we know there's actually an upgrade to do (avoids needless localhost
+  // calls on every dashboard load).
+  const needsUpgrade =
     currentVersion != null &&
     latestVersion != null &&
     semverLT(currentVersion, latestVersion);
+  useEffect(() => {
+    if (!needsUpgrade || oneClickReady !== null) return;
+    let cancelled = false;
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 1500);
+    fetch(`${DAEMON_LOCAL_BASE}/healthz`, { signal: ctrl.signal })
+      .then(r => r.ok ? r.json() : null)
+      .then((data: any) => {
+        clearTimeout(t);
+        if (cancelled) return;
+        // Daemon must report an /upgrade endpoint for one-click to work.
+        setOneClickReady(!!data && typeof data.upgrade_endpoint === "string");
+      })
+      .catch(() => { clearTimeout(t); if (!cancelled) setOneClickReady(false); });
+    return () => { cancelled = true; ctrl.abort(); };
+  }, [needsUpgrade, oneClickReady]);
 
+  const showBanner = !dismissed && needsUpgrade;
   if (!showBanner) return null;
 
   const installerCmd = ` npx -y @susurration/installer install --token ${auth.token ?? "sk_live_YOUR_TOKEN"}`;
-  const handleClick = () => {
+
+  // Copy-command path (MVP fallback). Used when daemon is on another machine,
+  // not running, or running an older version without /healthz.
+  const handleCopyClick = () => {
     navigator.clipboard.writeText(installerCmd).then(
       () => { setCopied(true); setTimeout(() => setCopied(false), 3000); },
       () => { /* clipboard denied; fallback: select text manually */ },
     );
-    // Phase 16 telemetry — track upgrade-prompt engagement
     fetch(`${API}/onboarding/event`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${auth.token}` },
       body: JSON.stringify({
         action: "upgrade_banner_click",
-        context: { current: currentVersion, latest: latestVersion },
+        context: { current: currentVersion, latest: latestVersion, path: "copy" },
       }),
       keepalive: true,
     }).catch(() => {});
   };
+
+  // One-click path. POSTs to local daemon, then polls /healthz until version updates.
+  const handleOneClickUpgrade = async () => {
+    setUpgradeState("upgrading");
+    setUpgradeError(null);
+    fetch(`${API}/onboarding/event`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${auth.token}` },
+      body: JSON.stringify({
+        action: "upgrade_banner_click",
+        context: { current: currentVersion, latest: latestVersion, path: "one_click" },
+      }),
+      keepalive: true,
+    }).catch(() => {});
+
+    let upgradeResp: any = null;
+    try {
+      // npm install can take ~30-60s; allow 2 min upper bound.
+      const ctrl = new AbortController();
+      const timeoutId = setTimeout(() => ctrl.abort(), 150_000);
+      const r = await fetch(`${DAEMON_LOCAL_BASE}/upgrade`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${auth.token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({}),
+        signal: ctrl.signal,
+      });
+      clearTimeout(timeoutId);
+      upgradeResp = await r.json().catch(() => null);
+      if (!r.ok) {
+        setUpgradeState("error");
+        setUpgradeError(upgradeResp?.error ? `${upgradeResp.error}${upgradeResp.hint ? ": " + upgradeResp.hint : ""}` : `HTTP ${r.status}`);
+        return;
+      }
+    } catch (err) {
+      setUpgradeState("error");
+      setUpgradeError((err as Error).message ?? "request failed");
+      return;
+    }
+
+    // already_latest → daemon claims it's already on latest. Verify against
+    // server's last_daemon_version (set from SSE UA, authoritative).
+    //
+    // Three cases:
+    //   A. server matches latest → trust both, set done
+    //   B. server has older version → daemon was upgraded out-of-band but not
+    //      restarted (manual npm install with no restart). Real error.
+    //   C. server has null → daemon hasn't reconnected SSE since boot, server
+    //      just doesn't know yet. Treat as soft-success: trust daemon.
+    if (upgradeResp?.status === "already_latest") {
+      try {
+        const me = await apiFetch<{ last_daemon_version: string | null }>("/identity/whoami");
+        let serverVersion = me.last_daemon_version;
+        if (serverVersion && latestVersion && !semverLT(serverVersion, latestVersion)) {
+          setUpgradeState("done");
+          setCurrentVersion(serverVersion);
+          return;
+        }
+        await new Promise(r => setTimeout(r, 5_000));
+        const me2 = await apiFetch<{ last_daemon_version: string | null }>("/identity/whoami").catch(() => null);
+        serverVersion = me2?.last_daemon_version ?? serverVersion;
+        if (serverVersion && latestVersion && !semverLT(serverVersion, latestVersion)) {
+          setUpgradeState("done");
+          setCurrentVersion(serverVersion);
+          return;
+        }
+        if (!serverVersion) {
+          // Case C — server hasn't seen the daemon yet. Trust daemon self-report.
+          setUpgradeState("done");
+          setCurrentVersion(latestVersion);
+          return;
+        }
+        // Case B — server has stale version. Real mismatch worth surfacing.
+        setUpgradeState("error");
+        setUpgradeError(lang === "zh"
+          ? `Daemon 自报已是最新但服务端记录的是 v${serverVersion}，请手动重启 daemon`
+          : `Daemon claims latest but server records v${serverVersion} — restart daemon manually`);
+      } catch {
+        setUpgradeState("error");
+        setUpgradeError(lang === "zh" ? "无法验证升级状态" : "Could not verify upgrade status");
+      }
+      return;
+    }
+
+    // upgrading → daemon is restarting. Poll /healthz until version bumps.
+    setUpgradeState("polling");
+    const pollDeadline = Date.now() + 60_000;  // 1 min ceiling
+    const target = latestVersion;
+    while (Date.now() < pollDeadline) {
+      await new Promise(r => setTimeout(r, 2_000));
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 1500);
+        const hc = await fetch(`${DAEMON_LOCAL_BASE}/healthz`, { signal: ctrl.signal });
+        clearTimeout(t);
+        if (hc.ok) {
+          const data = await hc.json() as { version?: string };
+          if (data.version && target && !semverLT(data.version, target) && data.version !== currentVersion) {
+            setUpgradeState("done");
+            setCurrentVersion(data.version);
+            return;
+          }
+        }
+      } catch { /* still restarting */ }
+    }
+    // Timed out — give up gracefully. Old daemon is dead, new daemon may have
+    // failed to spawn. Tell user to check manually.
+    setUpgradeState("error");
+    setUpgradeError(lang === "zh"
+      ? "升级后 daemon 未在 60 秒内启动，请手动重启"
+      : "Daemon did not start within 60s after upgrade — restart manually");
+  };
+
+  // After a one-click failure, future clicks fall through to copy-command path.
+  const effectiveOneClick = oneClickReady && upgradeState !== "error";
+  const handleClick = effectiveOneClick ? handleOneClickUpgrade : handleCopyClick;
+
+  let buttonLabel: string;
+  if (upgradeState === "upgrading") {
+    buttonLabel = lang === "zh" ? "升级中..." : "Upgrading...";
+  } else if (upgradeState === "polling") {
+    buttonLabel = lang === "zh" ? "等待重启..." : "Restarting...";
+  } else if (upgradeState === "done") {
+    buttonLabel = lang === "zh" ? "✓ 已升级" : "✓ Upgraded";
+  } else if (upgradeState === "error") {
+    buttonLabel = copied
+      ? (lang === "zh" ? "✓ 已复制" : "✓ Copied")
+      : (lang === "zh" ? "复制升级命令" : "Copy upgrade cmd");
+  } else if (effectiveOneClick) {
+    buttonLabel = lang === "zh" ? "一键升级" : "Upgrade now";
+  } else {
+    buttonLabel = copied
+      ? (lang === "zh" ? "✓ 已复制" : "✓ Copied")
+      : (lang === "zh" ? "复制升级命令" : "Copy upgrade cmd");
+  }
+  const busy = upgradeState === "upgrading" || upgradeState === "polling";
+  const buttonGreen = copied || upgradeState === "done";
 
   return (
     <div style={{
@@ -1111,25 +1294,25 @@ function UpgradeBanner() {
       </span>
       <button
         onClick={handleClick}
+        disabled={busy || upgradeState === "done"}
+        title={upgradeError ?? undefined}
         style={{
-          background: copied ? "var(--green)" : "var(--accent, #7aa2f7)",
-          color: copied ? "#0b0f1a" : "#0b0f1a",
+          background: buttonGreen ? "var(--green)" : "var(--accent, #7aa2f7)",
+          color: "#0b0f1a",
           border: "none",
           padding: "4px 12px",
           borderRadius: "var(--radius-sm, 4px)",
           fontFamily: "var(--mono)",
           fontSize: 11,
           fontWeight: 500,
-          cursor: "pointer",
+          cursor: busy || upgradeState === "done" ? "default" : "pointer",
+          opacity: busy ? 0.7 : 1,
           letterSpacing: "0.3px",
           transition: "background 120ms ease",
           whiteSpace: "nowrap",
         }}
       >
-        {copied
-          ? (lang === "zh" ? "✓ 已复制" : "✓ Copied")
-          : (lang === "zh" ? "复制升级命令" : "Copy upgrade cmd")
-        }
+        {buttonLabel}
       </button>
       <button
         onClick={() => setDismissed(true)}
@@ -1415,9 +1598,9 @@ function DashHome() {
         setPersistedCloses(m);
       }).catch(e => console.warn("[positions/closed] fetch failed:", e.message));
     // Phase 11a — pull server-side paper positions (auth-bound to caller).
-    apiFetch<{ positions: any[] }>("/paper_positions/mine?status=all")
+    apiFetch<{ positions: any[] }>("/positions/mine?status=all")
       .then(r => setServerPositions(r.positions ?? []))
-      .catch(e => console.warn("[paper_positions/mine] fetch failed:", e.message));
+      .catch(e => console.warn("[positions/mine] fetch failed:", e.message));
   }, []);
 
   useEffect(() => {
@@ -1430,8 +1613,17 @@ function DashHome() {
     if (!auth.address) return;
     // Phase 11a — server-side positions take precedence (cross-device truth).
     // Fallback to feed-derived for old daemons that haven't synced yet.
+    //
+    // Phase 17.5 (G review fix) — when raw comes from serverPositions, paper_positions
+    // table already carries authoritative close data (closed_at + exit_*). DO NOT
+    // overlay persistedCloses (the legacy /positions/closed → position_closes table),
+    // which has independently-computed exit_pnl_pct from server position_closer
+    // ticks and would corrupt the server-truth close info. persistedCloses is only
+    // valid as a fallback for feed-derived raw positions (pre-Phase-11a daemons).
     let raw: Position[] = [];
+    let fromServerTable = false;
     if (serverPositions.length > 0) {
+      fromServerTable = true;
       raw = serverPositions.map((p): Position => ({
         token: p.token,
         direction: p.direction === "short" ? "short" : "long",
@@ -1445,6 +1637,7 @@ function DashHome() {
         status: p.closed_at ? "closed" : "open",
         positionUsd: p.position_usd,
         isReplay: !!p.is_replay,
+        isBackfilled: !!p.is_backfilled,
         ...(p.closed_at ? {
           exitPrice: p.exit_price,
           exitReason: p.exit_reason,
@@ -1458,9 +1651,10 @@ function DashHome() {
     if (raw.length === 0) { setPositions([]); setPricesLoaded(true); return; }
     const openSymbols = [...new Set(raw.filter(p => p.status === "open").map(p => p.token))].join(",");
     if (!openSymbols) { setPositions(raw); setPricesLoaded(true); return; }
+    const closesForOverlay = fromServerTable ? new Map<string, CloseRecord>() : persistedCloses;
     apiFetch<{ prices: Record<string, number> }>(`/prices?symbols=${openSymbols}`)
       .then(r => {
-        const { positions: updated } = applyPrices(raw, r.prices, persistedCloses);
+        const { positions: updated } = applyPrices(raw, r.prices, closesForOverlay);
         setPositions(updated);
         setPricesLoaded(true);
       })
@@ -1478,9 +1672,15 @@ function DashHome() {
 
   // v4: replay positions are dry-run demos — excluded from PnL aggregates
   // so users don't accidentally treat demo PnL as real performance.
+  // Phase 17.5: backfilled positions have position_usd=0 (unrecoverable) so
+  // their pnlUsd is unreliable; they show up in the closed list (tagged
+  // "*历史推断*") but are excluded from total $ aggregates. Their pnl_pct is
+  // still authoritative (came from position_closes table) so they DO count
+  // toward the % win-rate stats.
   const realPositions = positions.filter(p => !p.isReplay);
-  const totalPnl = realPositions.reduce((s, p) => s + (p.pnlUsd ?? 0), 0);
-  const totalCapital = realPositions.reduce((s, p) => s + p.positionUsd, 0);
+  const moneyAccountable = realPositions.filter(p => !p.isBackfilled);
+  const totalPnl = moneyAccountable.reduce((s, p) => s + (p.pnlUsd ?? 0), 0);
+  const totalCapital = moneyAccountable.reduce((s, p) => s + p.positionUsd, 0);
   // Phase 14 G #3 — totalPnlPct uses % directly from positions (which DO have
   // real pnlPct from price math) so we can show meaningful % even when
   // positionUsd=0 (feed-derived fallback before daemon syncs to server).
@@ -1668,7 +1868,19 @@ function DashHome() {
                 const fmtPrice = (p: number) => p < 1 ? p.toPrecision(4) : p.toLocaleString(undefined, { maximumFractionDigits: 2 });
                 return (
                   <div className="positions-row" key={pos.signalId}>
-                    <span className="pos-token">{pos.token.replace(/USDT$/, "")}</span>
+                    <span className="pos-token">
+                      {pos.token.replace(/USDT$/, "")}
+                      {pos.isBackfilled && (
+                        <span className="backfill-tag">
+                          *{lang === "zh" ? "历史推断" : "inferred"}*
+                          <span className="backfill-tag-tooltip">
+                            {lang === "zh"
+                              ? "Phase 11a 之前的成交,只能从信号回推 entry/SL/TP;仓位金额不可考。"
+                              : "Reconstructed from pre-Phase-11a signals. Entry/SL/TP recovered, but position size is unrecoverable."}
+                          </span>
+                        </span>
+                      )}
+                    </span>
                     <span className={`pos-dir ${pos.direction}`}>{pos.direction.toUpperCase()} {pos.leverage}x</span>
                     <span className="pos-price-move">
                       <span>${fmtPrice(pos.entryPrice)}</span>

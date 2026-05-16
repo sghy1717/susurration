@@ -2085,6 +2085,54 @@ async function cmdConfig(args: string[]): Promise<number> {
 
 async function cmdBook(args: string[]): Promise<number> {
   const path = await import("node:path");
+
+  // Phase 17.5 — `susu book --queue` shows the paper close retry queue
+  // (~/.susu/paper_close_queue.json). Use this to debug "why is the position
+  // on server still showing open when I see closed locally" — entries in
+  // queue mean daemon tried to sync close but server didn't ack yet.
+  if (args.includes("--queue")) {
+    const queuePath = path.join(configDir(), "paper_close_queue.json");
+    let q: any;
+    try {
+      const raw = await (await import("node:fs/promises")).readFile(queuePath, "utf8");
+      q = JSON.parse(raw);
+    } catch {
+      process.stdout.write("paper close queue: empty (no pending close-mirror calls)\n");
+      return 0;
+    }
+    const entries = Array.isArray(q?.entries) ? q.entries : [];
+    if (args.includes("--json")) {
+      process.stdout.write(JSON.stringify({ depth: entries.length, entries }, null, 2) + "\n");
+      return 0;
+    }
+    if (entries.length === 0) {
+      process.stdout.write("paper close queue: empty\n");
+      return 0;
+    }
+    const isTTY = process.stdout.isTTY;
+    const dim = (s: string) => isTTY ? `\x1b[2m${s}\x1b[0m` : s;
+    const yellow = (s: string) => isTTY ? `\x1b[33m${s}\x1b[0m` : s;
+    const red = (s: string) => isTTY ? `\x1b[31m${s}\x1b[0m` : s;
+    const stale = entries.filter((e: any) => (e.attempts ?? 0) >= 5).length;
+    process.stdout.write(`Paper Close Queue\n`);
+    process.stdout.write(`  Pending: ${entries.length}  Stale (≥5 retries): ${stale > 0 ? red(String(stale)) : stale}\n\n`);
+    for (const e of entries) {
+      const sigShort = (e.payload?.signal_id ?? "").slice(0, 8);
+      const ageMin = e.first_enqueued_at
+        ? ((Date.now() - new Date(e.first_enqueued_at).getTime()) / 60_000).toFixed(1)
+        : "?";
+      const dueMs = e.next_attempt_at ? new Date(e.next_attempt_at).getTime() - Date.now() : 0;
+      const dueLabel = dueMs <= 0 ? "now" : `in ${(dueMs / 1000).toFixed(0)}s`;
+      const attemptStr = (e.attempts ?? 0) >= 5 ? red(`${e.attempts} attempts`) : yellow(`${e.attempts ?? 0} attempts`);
+      process.stdout.write(
+        `  ${sigShort}…  ${e.payload?.exit_reason ?? "?"}  ${attemptStr}  ` +
+        `${dim(`enqueued ${ageMin}min ago, next try ${dueLabel}`)}\n`,
+      );
+      if (e.last_error) process.stdout.write(`    ${dim(`last error: ${e.last_error}`)}\n`);
+    }
+    return 0;
+  }
+
   const tradesPath = path.join(configDir(), "paper_trades.json");
   let book: any;
   try {

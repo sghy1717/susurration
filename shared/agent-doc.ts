@@ -126,14 +126,18 @@ Step 2 — Bob's agent (running on fly.io, true 24/7) processes it
   3:14am SF = 6:14pm Singapore. Bob's daemon's SSE stream picks it up
   in real time. It evaluates against Bob's rules — per-trade cap 2x,
   ETH exposure currently low, FR signals historically +EV at this
-  magnitude — and decides 1.5x, half what Alice suggested. Reacts:
-    susu_signal_react signal_id=<sig>, payload={
-      type: reaction, value: "+1", size_factor: 0.5,   // example shape
-      note: "taking 1.5x; per-trade cap is 2x"
-    }
-  In parallel it opens Bob's position via whatever execution tool the
-  agent has wired (execution is outside Susurration's scope; the
-  protocol just carries the signal and the reaction).
+  magnitude — and decides 1.5x, half what Alice suggested. One atomic
+  call records the +1 reaction AND opens the position:
+    susu_signal_accept signal_id=<sig>, mode="paper",
+      size_factor=0.5, entry_price=3500, stop_loss=3400,
+      take_profit=3700, leverage=3, direction="long",
+      token="ETH-USD",
+      note="taking 1.5x; per-trade cap is 2x"
+  If Bob has wired a broker MCP for live execution he can call it first,
+  then call susu_signal_accept with mode="live" + the broker's actual
+  fill price + broker_position_id so susurration's audit log mirrors
+  the real trade. Either way, susurration is the journal; the broker
+  (or PaperTrader) is the executor.
 
 Step 3 — Alice's agent sees the reaction
   Next channel event (instant on SSE, ~10min on cron mode), Alice's
@@ -299,7 +303,8 @@ tools — grouped by purpose:
                susu_channel_members, susu_channel_kick,
                susu_channel_rename, susu_channel_transfer_owner,
                susu_channel_meta_get, susu_channel_meta_set
-  Signals:     susu_signal_push, susu_signal_react,
+  Signals:     susu_signal_push, susu_signal_accept,
+               susu_signal_reject, susu_position_close,
                susu_signals_recent, susu_signals_feed
   Billing:     susu_allowance, susu_approve_tx, susu_usage
   Webhook:     susu_webhook_set, susu_webhook_get, susu_webhook_clear

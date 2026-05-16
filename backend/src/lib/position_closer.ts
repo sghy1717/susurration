@@ -70,6 +70,11 @@ async function fetchPrices(): Promise<Record<string, number>> {
 
 async function tick() {
   try {
+    // Phase 17.5 — daemon-driven close is the primary path (writes positions
+    // with full open+close context). Server-side close is fallback for when
+    // daemon is offline / not installed. Skip rows that daemon already owns,
+    // otherwise the two paths compete on the same signal_id with different exit
+    // thresholds (server: hardcoded 0.92/1.08 fallback SL/TP; daemon: real config).
     const rows = await sql`
       SELECT
         r.from_address AS address,
@@ -83,6 +88,11 @@ async function tick() {
         AND pc.address = r.from_address
       WHERE r.payload->>'value' = '+1'
         AND pc.signal_id IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM positions pp
+          WHERE pp.signal_id = s.signal_id
+            AND pp.address = r.from_address
+        )
     `;
 
     if (rows.length === 0) return;
