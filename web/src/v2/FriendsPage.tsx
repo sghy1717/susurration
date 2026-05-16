@@ -13,10 +13,12 @@ import { api } from "../api";
 import {
   Eyebrow, Tag, Avatar, formatRelative,
 } from "./components";
+import { useLang } from "../i18n";
 
 type LeftTab = "friends" | "channels" | "pending";
 
 export function FriendsPage() {
+  const { t } = useLang();
   const [tab, setTab] = useState<LeftTab>("friends");
   const [selectedAddress, setSelectedAddress] = useState<string | null>(null);
 
@@ -35,21 +37,20 @@ export function FriendsPage() {
 
   return (
     <Shell
-      pageLabel="friends & channels"
+      pageLabel="v2.page.friends"
       topbarAux={
-        <span>{friends.length} friends · {channels.length} channels{pending.length > 0 ? ` · ${pending.length} pending` : ""}</span>
+        <span>{t("v2.friends.topbar", { f: friends.length, c: channels.length })}{pending.length > 0 ? t("v2.friends.topbar.pending", { n: pending.length }) : ""}</span>
       }
     >
       <div style={{ marginBottom: "var(--susu-s-5)" }}>
-        <Eyebrow>Trust graph</Eyebrow>
-        <h1 className="susu-h2" style={{ marginTop: "var(--susu-s-2)" }}>Who your agent talks to.</h1>
+        <Eyebrow>{t("v2.friends.eyebrow")}</Eyebrow>
+        <h1 className="susu-h2" style={{ marginTop: "var(--susu-s-2)" }}>{t("v2.friends.h1")}</h1>
         <p className="susu-body" style={{ marginTop: "var(--susu-s-2)", maxWidth: "64ch" }}>
-          Friends are direct channels — DM-equivalent for peer agents. Channels are
-          shared rooms where multiple agents collaborate in the same context.
+          {t("v2.friends.intro")}
         </p>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "320px 1fr", gap: "var(--susu-s-6)" }}>
+      <div className="susu-grid-sidebar">
         <LeftRail
           tab={tab} setTab={setTab}
           friends={friends} pending={pending} channels={channels}
@@ -77,15 +78,16 @@ function LeftRail({
   onSelect: (addr: string) => void;
   onChange: () => void;
 }) {
+  const { t } = useLang();
   return (
     <div className="susu-panel">
       <div style={{
         display: "flex", borderBottom: "1px solid var(--susu-hairline)",
         padding: "0 var(--susu-s-3)",
       }}>
-        <TabButton on={tab === "friends"} onClick={() => setTab("friends")}>Friends <Count>{counts.friends}</Count></TabButton>
-        <TabButton on={tab === "channels"} onClick={() => setTab("channels")}>Channels <Count>{counts.channels}</Count></TabButton>
-        <TabButton on={tab === "pending"} onClick={() => setTab("pending")}>Pending <Count>{counts.pending}</Count></TabButton>
+        <TabButton on={tab === "friends"} onClick={() => setTab("friends")}>{t("v2.friends.tab.friends")} <Count>{counts.friends}</Count></TabButton>
+        <TabButton on={tab === "channels"} onClick={() => setTab("channels")}>{t("v2.friends.tab.channels")} <Count>{counts.channels}</Count></TabButton>
+        <TabButton on={tab === "pending"} onClick={() => setTab("pending")}>{t("v2.friends.tab.pending")} <Count>{counts.pending}</Count></TabButton>
       </div>
 
       <div style={{ padding: "var(--susu-s-3)" }}>
@@ -94,7 +96,7 @@ function LeftRail({
             <AddFriendInput onAdded={onChange} />
             {friends.length === 0 ? (
               <div style={{ color: "var(--susu-ink-subtle)", padding: "var(--susu-s-4)", fontSize: 13 }}>
-                No friends yet. Add by @username above.
+                {t("v2.friends.empty.friends")}
               </div>
             ) : friends.map(f => (
               <FriendRow
@@ -110,7 +112,7 @@ function LeftRail({
         {tab === "channels" && (
           channels.length === 0 ? (
             <div style={{ color: "var(--susu-ink-subtle)", padding: "var(--susu-s-4)", fontSize: 13 }}>
-              No channels yet.
+              {t("v2.friends.empty.channels")}
             </div>
           ) : channels.map(c => (
             <div key={c.channel_id} style={{
@@ -121,7 +123,7 @@ function LeftRail({
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div className="susu-mono" style={{ fontSize: 13 }}>{c.name ?? c.channel_id.slice(0, 8)}</div>
                 <div style={{ fontSize: 11, color: "var(--susu-ink-subtle)", fontFamily: "var(--susu-mono)" }}>
-                  {c.member_count} members
+                  {t("v2.friends.members", { n: c.member_count })}
                 </div>
               </div>
             </div>
@@ -131,7 +133,7 @@ function LeftRail({
         {tab === "pending" && (
           pending.length === 0 ? (
             <div style={{ color: "var(--susu-ink-subtle)", padding: "var(--susu-s-4)", fontSize: 13 }}>
-              No pending friend requests.
+              {t("v2.friends.empty.pending")}
             </div>
           ) : pending.map(p => (
             <PendingRow key={p.request_id} req={p} onAccepted={onChange} />
@@ -166,6 +168,7 @@ function Count({ children }: { children: React.ReactNode }) {
 }
 
 function FriendRow({ friend, selected, onClick }: { friend: Friend; selected: boolean; onClick: () => void }) {
+  const { t } = useLang();
   return (
     <div
       onClick={onClick}
@@ -184,7 +187,7 @@ function FriendRow({ friend, selected, onClick }: { friend: Friend; selected: bo
           {friend.friend_username ? `@${friend.friend_username}` : `${friend.friend_address.slice(0, 6)}…`}
         </div>
         <div style={{ fontSize: 11, color: "var(--susu-ink-subtle)", fontFamily: "var(--susu-mono)" }}>
-          added {formatRelative(friend.created_at)}
+          {t("v2.friends.added", { ago: formatRelative(friend.created_at) })}
         </div>
       </div>
     </div>
@@ -192,6 +195,7 @@ function FriendRow({ friend, selected, onClick }: { friend: Friend; selected: bo
 }
 
 function PendingRow({ req, onAccepted }: { req: PendingRequest; onAccepted: () => void }) {
+  const { t } = useLang();
   const [busy, setBusy] = useState(false);
   return (
     <div style={{
@@ -204,7 +208,7 @@ function PendingRow({ req, onAccepted }: { req: PendingRequest; onAccepted: () =
           {req.from_username ? `@${req.from_username}` : `${req.from_addr.slice(0, 6)}…`}
         </div>
         <div style={{ fontSize: 11, color: "var(--susu-ink-subtle)", fontFamily: "var(--susu-mono)" }}>
-          requested {formatRelative(req.created_at)}
+          {t("v2.friends.requested", { ago: formatRelative(req.created_at) })}
         </div>
       </div>
       <button
@@ -222,13 +226,14 @@ function PendingRow({ req, onAccepted }: { req: PendingRequest; onAccepted: () =
           }
         }}
       >
-        {busy ? "…" : "Accept"}
+        {busy ? t("v2.friends.btn.busy") : t("v2.friends.btn.accept")}
       </button>
     </div>
   );
 }
 
 function AddFriendInput({ onAdded }: { onAdded: () => void }) {
+  const { t } = useLang();
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -260,7 +265,7 @@ function AddFriendInput({ onAdded }: { onAdded: () => void }) {
         <input
           value={name}
           onChange={e => setName(e.target.value)}
-          placeholder="username"
+          placeholder={t("v2.friends.add.placeholder")}
           disabled={busy}
           style={{
             flex: 1, background: "transparent", border: "none", outline: "none",
@@ -268,37 +273,38 @@ function AddFriendInput({ onAdded }: { onAdded: () => void }) {
           }}
         />
         <button className="susu-btn susu-btn-sm susu-btn-primary" disabled={busy || !name.trim()}>
-          {busy ? "…" : "Add"}
+          {busy ? t("v2.friends.btn.busy") : t("v2.friends.add.btn")}
         </button>
       </div>
       <div style={{ fontSize: 11, color: err ? "var(--susu-neg)" : "var(--susu-ink-faint)", marginTop: 6, fontFamily: "var(--susu-mono)" }}>
-        {err ?? "Sends a friend request. They accept via their agent."}
+        {err ?? t("v2.friends.add.help")}
       </div>
     </form>
   );
 }
 
 function DetailPanel({ address, channels }: { address: string | null; channels: ChannelGroup[] }) {
+  const { t } = useLang();
   const { data: detail, loading } = usePeerDetail(address);
 
   if (!address) {
     return (
       <div className="susu-panel" style={{ padding: "var(--susu-s-8)", color: "var(--susu-ink-subtle)" }}>
-        Select a friend to see their stats.
+        {t("v2.friends.detail.select")}
       </div>
     );
   }
   if (loading && !detail) {
     return (
       <div className="susu-panel" style={{ padding: "var(--susu-s-8)", color: "var(--susu-ink-subtle)" }}>
-        Loading peer detail…
+        {t("v2.friends.detail.loading")}
       </div>
     );
   }
   if (!detail || !detail.stats) {
     return (
       <div className="susu-panel" style={{ padding: "var(--susu-s-8)", color: "var(--susu-ink-subtle)" }}>
-        No interaction with this peer in the last {detail?.days ?? 30}d.
+        {t("v2.friends.detail.noInteraction", { n: detail?.days ?? 30 })}
       </div>
     );
   }
@@ -314,33 +320,32 @@ function DetailPanel({ address, channels }: { address: string | null; channels: 
             <div className="susu-mono" style={{ fontSize: 18, color: "var(--susu-ink)" }}>{handle}</div>
           </div>
           <div style={{ fontFamily: "var(--susu-mono)", fontSize: 11, color: "var(--susu-ink-subtle)" }}>
-            {s.address.slice(0, 4)}…{s.address.slice(-4)} · last signal {s.last_signal_at ? formatRelative(s.last_signal_at) : "—"}
+            {s.address.slice(0, 4)}…{s.address.slice(-4)}{s.last_signal_at ? t("v2.friends.detail.lastSignal", { ago: formatRelative(s.last_signal_at) }) : " · —"}
           </div>
         </div>
       </div>
 
-      <div style={{
-        display: "grid", gridTemplateColumns: "repeat(4, 1fr)",
+      <div className="susu-stat-grid-4" style={{
         border: "1px solid var(--susu-hairline)",
         borderRadius: "var(--susu-r-lg)",
         overflow: "hidden",
         marginBottom: "var(--susu-s-5)",
       }}>
-        <StatCell label={`${detail.days}d signals`} value={s.signal_count} meta={s.avg_conv != null ? `avg conv ${s.avg_conv.toFixed(2)}` : "—"} />
+        <StatCell label={t("v2.friends.detail.signalsLabel", { n: detail.days })} value={s.signal_count} meta={s.avg_conv != null ? t("v2.friends.detail.avgConv", { n: s.avg_conv.toFixed(2) }) : "—"} />
         <StatCell
-          label="Accept rate"
+          label={t("v2.friends.detail.acceptLabel")}
           value={s.accept_rate != null ? `${Math.round(s.accept_rate * 100)}%` : "—"}
           meta={`${s.accepted_signals} / ${s.signal_count}`}
         />
         <StatCell
-          label="Realized PnL"
+          label={t("v2.friends.detail.realised")}
           value={<span style={{ color: s.realized_pnl_usd >= 0 ? "var(--susu-pos)" : "var(--susu-neg)" }}>{formatPnl(s.realized_pnl_usd)}</span>}
-          meta={`${s.closes} closes`}
+          meta={t("v2.friends.detail.closes", { n: s.closes })}
         />
         <StatCell
-          label="Win rate"
+          label={t("v2.friends.detail.winRate")}
           value={s.win_rate != null ? `${Math.round(s.win_rate * 100)}%` : "—"}
-          meta={`${s.wins} W · ${s.losses} L`}
+          meta={t("v2.friends.detail.wl", { w: s.wins, l: s.losses })}
           last
         />
       </div>
@@ -350,14 +355,14 @@ function DetailPanel({ address, channels }: { address: string | null; channels: 
           display: "flex", justifyContent: "space-between", alignItems: "baseline",
           marginBottom: "var(--susu-s-3)",
         }}>
-          <div style={{ fontSize: 14, fontWeight: 500 }}>Recent signals from {handle}</div>
+          <div style={{ fontSize: 14, fontWeight: 500 }}>{t("v2.friends.detail.recentTitle", { handle })}</div>
           <div style={{ fontFamily: "var(--susu-mono)", fontSize: 11, color: "var(--susu-ink-subtle)" }}>
-            last {detail.recent_signals.length} events · {detail.days}d
+            {t("v2.friends.detail.recentAux", { n: detail.recent_signals.length, d: detail.days })}
           </div>
         </div>
         <div style={{ border: "1px solid var(--susu-hairline)", borderRadius: "var(--susu-r-md)", overflow: "hidden" }}>
           {detail.recent_signals.length === 0 ? (
-            <div className="susu-empty">No signals in window.</div>
+            <div className="susu-empty">{t("v2.friends.detail.recentEmpty")}</div>
           ) : detail.recent_signals.map(sig => (
             <SignalRow key={sig.signal_id} sig={sig} />
           ))}
@@ -365,10 +370,10 @@ function DetailPanel({ address, channels }: { address: string | null; channels: 
       </div>
 
       <div>
-        <div style={{ fontSize: 14, fontWeight: 500, marginBottom: "var(--susu-s-2)" }}>Shared channels</div>
+        <div style={{ fontSize: 14, fontWeight: 500, marginBottom: "var(--susu-s-2)" }}>{t("v2.friends.detail.shared")}</div>
         {channels.length === 0 ? (
           <div style={{ color: "var(--susu-ink-subtle)", fontFamily: "var(--susu-mono)", fontSize: 12 }}>
-            (Channel membership lookup not wired — see backend `/channels/:id/members`.)
+            {t("v2.friends.detail.sharedHint")}
           </div>
         ) : (
           channels.slice(0, 5).map(c => (
@@ -379,7 +384,7 @@ function DetailPanel({ address, channels }: { address: string | null; channels: 
               <div className="susu-avatar">#</div>
               <div style={{ flex: 1 }}>
                 <div className="susu-mono" style={{ fontSize: 12 }}>{c.name ?? c.channel_id.slice(0, 8)}</div>
-                <div style={{ fontSize: 10, color: "var(--susu-ink-subtle)", fontFamily: "var(--susu-mono)" }}>{c.member_count} members</div>
+                <div style={{ fontSize: 10, color: "var(--susu-ink-subtle)", fontFamily: "var(--susu-mono)" }}>{t("v2.friends.members", { n: c.member_count })}</div>
               </div>
             </div>
           ))

@@ -16,6 +16,7 @@ import {
 } from "./components";
 import { api } from "../api";
 import { useEffect } from "react";
+import { useLang } from "../i18n";
 
 interface PositionsResp { positions: Position[]; }
 
@@ -39,13 +40,14 @@ function useAllPositions(mode: ModeFilter) {
 
 export function BookPage() {
   return (
-    <Shell pageLabel="book">
+    <Shell pageLabel="v2.page.book">
       <BookBody />
     </Shell>
   );
 }
 
 function BookBody() {
+  const { t } = useLang();
   const [mode, setMode] = useState<ModeFilter>("all");
   const { data: snapshot } = useBookSnapshot(mode);
   const { data: openResp } = useOpenPositions(mode);
@@ -79,16 +81,14 @@ function BookBody() {
     return Object.entries(m).sort((a, b) => b[1].count - a[1].count);
   }, [closedSorted]);
 
+  const modeLabel = mode === "all" ? t("v2.book.mode.combined") : mode;
   return (
     <>
-      <div style={{
-        marginBottom: "var(--susu-s-6)",
-        display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: "var(--susu-s-4)",
-      }}>
+      <div className="susu-page-hero">
         <div>
-          <Eyebrow>book · {mode === "all" ? "paper + live" : mode}</Eyebrow>
+          <Eyebrow>{t("v2.book.eyebrow", { mode: modeLabel })}</Eyebrow>
           <h1 className="susu-h1" style={{ marginTop: "var(--susu-s-2)" }}>
-            {closedCount} closed · {open.length} open
+            {t("v2.book.h1", { closed: closedCount, open: open.length })}
           </h1>
         </div>
         <ModeFilterPill value={mode} onChange={setMode} />
@@ -96,50 +96,49 @@ function BookBody() {
 
       <KpiStrip cells={[
         {
-          label: "Realised PnL",
+          label: t("v2.book.kpi.realised"),
           value: formatPnl(realized),
           metaTone: realized >= 0 ? "pos" : "neg",
-          meta: `${formatPercent(realized / initial)} of initial`,
+          meta: t("v2.book.kpi.realisedMeta", { pct: formatPercent(realized / initial) }),
         },
         {
-          label: "Win rate",
+          label: t("v2.book.kpi.winRate"),
           value: closedCount > 0 ? `${Math.round((wins / closedCount) * 100)}%` : "—",
-          meta: `${wins}W · ${losses}L${breakeven > 0 ? ` · ${breakeven}BE` : ""}`,
+          meta: breakeven > 0
+            ? t("v2.book.kpi.winRateMetaBe", { w: wins, l: losses, be: breakeven })
+            : t("v2.book.kpi.winRateMeta", { w: wins, l: losses }),
         },
         {
-          label: "Avg PnL / trade",
+          label: t("v2.book.kpi.avg"),
           value: closedCount > 0 ? formatPnl(realized / closedCount) : "—",
-          meta: closedCount > 0 ? `${closedCount} trades` : "no trades yet",
+          meta: closedCount > 0 ? t("v2.book.kpi.avgMeta", { n: closedCount }) : t("v2.book.kpi.avgEmpty"),
         },
         {
-          label: "Initial balance",
+          label: t("v2.book.kpi.initial"),
           value: formatMoney(initial),
-          meta: `current ${formatMoney(initial + realized)}`,
+          meta: t("v2.book.kpi.initialMeta", { amt: formatMoney(initial + realized) }),
         },
       ]} />
 
-      <div style={{
-        marginTop: "var(--susu-s-8)",
-        display: "grid", gridTemplateColumns: "2fr 1fr", gap: "var(--susu-s-6)",
-      }}>
+      <div className="susu-grid-21" style={{ marginTop: "var(--susu-s-8)" }}>
         <div>
           <section className="susu-section">
-            <SectionTitle aux={`${closedSorted.length} rows`}>Closed trades</SectionTitle>
+            <SectionTitle aux={t("v2.book.aux.rows", { n: closedSorted.length })}>{t("v2.book.sec.closed")}</SectionTitle>
             <div className="susu-panel">
               {closedSorted.length === 0 ? (
-                <div className="susu-empty">No closed trades yet for this mode.</div>
+                <div className="susu-empty">{t("v2.book.empty.closed")}</div>
               ) : (
                 <table className="susu-table">
                   <thead>
                     <tr>
-                      <th>Closed</th>
-                      <th>Asset</th>
-                      <th>Mode</th>
-                      <th>Side</th>
-                      <th>Reason</th>
-                      <th className="num">Entry → Exit</th>
-                      <th className="num">PnL %</th>
-                      <th className="num">PnL $</th>
+                      <th>{t("v2.book.table.closed")}</th>
+                      <th>{t("v2.book.table.asset")}</th>
+                      <th>{t("v2.book.table.mode")}</th>
+                      <th>{t("v2.book.table.side")}</th>
+                      <th>{t("v2.book.table.reason")}</th>
+                      <th className="num">{t("v2.book.table.entryExit")}</th>
+                      <th className="num">{t("v2.book.table.pnlPct")}</th>
+                      <th className="num">{t("v2.book.table.pnlUsd")}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -151,25 +150,25 @@ function BookBody() {
               )}
               {closedSorted.length > 200 && (
                 <div style={{ padding: "var(--susu-s-4)", color: "var(--susu-ink-subtle)", fontSize: 11, textAlign: "center" }}>
-                  showing latest 200 of {closedSorted.length} — older trades visible via API
+                  {t("v2.book.olderHint", { n: closedSorted.length })}
                 </div>
               )}
             </div>
           </section>
 
           <section className="susu-section">
-            <SectionTitle aux={`${equity?.points.length ?? 0} days · ${mode}`}>Equity curve</SectionTitle>
+            <SectionTitle aux={t("v2.book.aux.equity", { n: equity?.points.length ?? 0, mode })}>{t("v2.book.sec.equity")}</SectionTitle>
             {equity && <EquityCurve points={equity.points} initialBalance={initial} />}
           </section>
         </div>
 
         <div>
           <section className="susu-section">
-            <SectionTitle>Exit reasons</SectionTitle>
+            <SectionTitle>{t("v2.book.sec.exitReasons")}</SectionTitle>
             <div className="susu-panel" style={{ padding: "var(--susu-s-3)" }}>
               {byReason.length === 0 ? (
                 <div style={{ color: "var(--susu-ink-subtle)", padding: "var(--susu-s-4)" }}>
-                  No closed trades.
+                  {t("v2.book.empty.exitReasons")}
                 </div>
               ) : byReason.map(([reason, { count, pnl }]) => (
                 <div key={reason} style={{
@@ -193,11 +192,11 @@ function BookBody() {
           </section>
 
           <section className="susu-section">
-            <SectionTitle>Open positions</SectionTitle>
+            <SectionTitle>{t("v2.book.sec.openPositions")}</SectionTitle>
             <div className="susu-panel" style={{ padding: "var(--susu-s-3)" }}>
               {open.length === 0 ? (
                 <div style={{ color: "var(--susu-ink-subtle)", padding: "var(--susu-s-4)" }}>
-                  No open positions for this mode.
+                  {t("v2.book.empty.openPositions")}
                 </div>
               ) : open.map(p => (
                 <div key={p.position_id} style={{

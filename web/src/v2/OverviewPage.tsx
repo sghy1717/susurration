@@ -16,16 +16,18 @@ import {
   EquityCurve, ReadOnlyFootnote, ModeFilterPill, ModeBadge, PriceSlider,
   StructuredEventCard, formatClock,
 } from "./components";
+import { useLang } from "../i18n";
 
 export function OverviewPage() {
   return (
-    <Shell pageLabel="overview">
+    <Shell pageLabel="v2.page.overview">
       <OverviewBody />
     </Shell>
   );
 }
 
 function OverviewBody() {
+  const { t } = useLang();
   // Phase 18.2 — mode is dashboard-local state (no need to persist yet; the
   // toggle is a glance-level convenience, not a setting). All hero data flows
   // off this so a single click reshapes every KPI on the page.
@@ -67,19 +69,12 @@ function OverviewBody() {
 
   return (
     <>
-      <div style={{
-        marginBottom: "var(--susu-s-6)",
-        display: "flex", alignItems: "flex-end", justifyContent: "space-between",
-        gap: "var(--susu-s-4)",
-      }}>
+      <div className="susu-page-hero">
         <div>
-          <Eyebrow>book · last 21 days</Eyebrow>
+          <Eyebrow>{t("v2.ov.eyebrow")}</Eyebrow>
           {/* Phase 18.2-w UX pass — reserve two lines of height so the
               hero doesn't reflow between 1 and 2 lines as the live PnL
-              digit count changes (e.g. +$471.53 fits one line, +$1,034.00
-              wraps to two). Below content (KPI strip, panels) stays put.
-              line-height in tokens.css is 1.12; 2 × 1.12em + a little
-              slack covers descenders and the gap. */}
+              digit count changes. */}
           <h1
             className="susu-h1"
             style={{
@@ -87,61 +82,62 @@ function OverviewBody() {
               minHeight: "2.4em",
             }}
           >
-            Your agent traded{" "}
+            {t("v2.ov.hero.pre")}
             <TickValue
               value={totalPnl}
               format={v => formatPnl(typeof v === "number" ? v : Number(v))}
               style={{ color: totalPnl >= 0 ? "var(--susu-pos)" : "var(--susu-neg)" }}
-            />{" "}
-            while you slept.
+            />
+            {t("v2.ov.hero.post")}
           </h1>
         </div>
-        <div style={{ display: "flex", gap: "var(--susu-s-3)", flexShrink: 0, alignItems: "center" }}>
+        <div className="susu-page-hero-actions">
           <ModeFilterPill value={mode} onChange={setMode} />
           <div style={{ display: "flex", gap: "var(--susu-s-2)" }}>
-            <button className="susu-btn">21d</button>
-            <button className="susu-btn susu-btn-ghost">7d</button>
-            <button className="susu-btn susu-btn-ghost">24h</button>
+            <button className="susu-btn">{t("v2.ov.range.21d")}</button>
+            <button className="susu-btn susu-btn-ghost">{t("v2.ov.range.7d")}</button>
+            <button className="susu-btn susu-btn-ghost">{t("v2.ov.range.24h")}</button>
           </div>
         </div>
       </div>
 
       <KpiStrip cells={[
         {
-          label: "Balance",
+          label: t("v2.ov.kpi.balance"),
           value: <TickValue value={balance} format={v => formatMoney(typeof v === "number" ? v : Number(v))} />,
           meta: <TickValue value={pctVsInitial} format={v => formatPercent((typeof v === "number" ? v : Number(v)) / 100)} /> ,
           metaTone: totalPnl >= 0 ? "pos" : "neg",
         },
         {
-          label: "Win rate",
+          label: t("v2.ov.kpi.winRate"),
           value: snapshot?.win_rate != null ? `${Math.round(snapshot.win_rate * 100)}%` : "—",
-          meta: snapshot ? `${snapshot.wins} wins · ${snapshot.losses} losses · ${snapshot.closed_count} closed` : (snapLoading ? "loading…" : "—"),
+          meta: snapshot
+            ? t("v2.ov.kpi.winRateMeta", { wins: snapshot.wins, losses: snapshot.losses, closed: snapshot.closed_count })
+            : (snapLoading ? t("v2.ov.kpi.loading") : "—"),
         },
         {
-          label: "Signals received",
+          label: t("v2.ov.kpi.signalsReceived"),
           value: snapshot?.signals_received_24h ?? "—",
           meta: snapshot ? (
             <>react +1 · <TickValue value={snapshot.accepted_24h} /> {snapshot.accept_rate_24h != null ? `(${Math.round(snapshot.accept_rate_24h * 100)}%)` : ""}</>
           ) : "—",
         },
         {
-          label: "Open positions",
+          label: t("v2.ov.kpi.openPositions"),
           value: positions.length,
-          meta: <>unrealized <TickValue value={unrealized} format={v => formatPnl(typeof v === "number" ? v : Number(v))} style={{ color: unrealized >= 0 ? "var(--susu-pos)" : "var(--susu-neg)" }} /></>,
+          meta: <>{t("v2.ov.kpi.unrealized")} <TickValue value={unrealized} format={v => formatPnl(typeof v === "number" ? v : Number(v))} style={{ color: unrealized >= 0 ? "var(--susu-pos)" : "var(--susu-neg)" }} /></>,
         },
       ]} />
 
-      <div style={{
-        display: "grid",
-        gridTemplateColumns: "2fr 1fr",
-        gap: "var(--susu-s-6)",
-        marginTop: "var(--susu-s-8)",
-      }}>
+      <div className="susu-grid-21" style={{ marginTop: "var(--susu-s-8)" }}>
         <div>
           <section className="susu-section">
-            <SectionTitle aux={`${positions.length} open${mode !== "all" ? ` · ${mode}` : ""}${positions[0]?.opened_at ? ` · marked at ${formatClock(new Date().toISOString())} UTC` : ""}`}>
-              Open positions
+            <SectionTitle aux={
+              t("v2.ov.aux.openCount", { n: positions.length })
+              + (mode !== "all" ? ` · ${mode}` : "")
+              + (positions[0]?.opened_at ? t("v2.ov.aux.markedAt", { time: formatClock(new Date().toISOString()) }) : "")
+            }>
+              {t("v2.ov.sec.openPositions")}
             </SectionTitle>
             {/* Phase 18.2-w UX pass — fixed min-height so toggling
                 ALL/PAPER/LIVE (or any change that shrinks the row count
@@ -157,25 +153,19 @@ function OverviewBody() {
                     display: "flex", alignItems: "center", justifyContent: "center",
                   }}
                 >
-                  No open positions — your daemon is watching.
+                  {t("v2.ov.empty.openPositions")}
                 </div>
               ) : (
                 <table className="susu-table" style={{ fontVariantNumeric: "tabular-nums" }}>
                   <thead>
                     <tr>
-                      <th>Asset</th>
-                      <th>Mode</th>
-                      <th>Side</th>
-                      <th>From</th>
-                      <th>SL · Mark · TP</th>
-                      {/* Phase 18.2-w UX fix — PnL + Duration headers and
-                          values left-align to match Asset / Mode / etc.
-                          The lone right-aligned column read as inconsistent
-                          per Haze. tabular-nums on the table keeps digit
-                          widths uniform so the left edge of each value still
-                          sits on the same x across rows. */}
-                      <th>PnL</th>
-                      <th>Duration</th>
+                      <th>{t("v2.ov.table.asset")}</th>
+                      <th>{t("v2.ov.table.mode")}</th>
+                      <th>{t("v2.ov.table.side")}</th>
+                      <th>{t("v2.ov.table.from")}</th>
+                      <th>{t("v2.ov.table.slMarkTp")}</th>
+                      <th>{t("v2.ov.table.pnl")}</th>
+                      <th>{t("v2.ov.table.duration")}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -190,11 +180,11 @@ function OverviewBody() {
 
           <section className="susu-section">
             <SectionTitle aux={
-              !equity ? "loading…"
-              : mode === "all" ? `paper + live · ${equity.points.length} days`
-              : `${mode} only · ${equity.points.length} days`
+              !equity ? t("v2.ov.aux.equityLoading")
+              : mode === "all" ? t("v2.ov.aux.equityAll", { n: equity.points.length })
+              : t("v2.ov.aux.equityOne", { mode, n: equity.points.length })
             }>
-              Equity curve
+              {t("v2.ov.sec.equity")}
             </SectionTitle>
             {equity && (
               <EquityCurve
@@ -202,7 +192,7 @@ function OverviewBody() {
                 secondaryPoints={equitySecondary?.points}
                 initialBalance={initial}
                 primaryColor={mode === "live" ? "#f6c177" : "#34d399"}
-                primaryLabel={mode === "all" ? "paper" : undefined}
+                primaryLabel={mode === "all" ? t("v2.equity.legend.paper") : undefined}
               />
             )}
             {/* Phase 18.2-w (H P3b) — one-sentence prose summary so the
@@ -212,8 +202,8 @@ function OverviewBody() {
           </section>
 
           <section className="susu-section">
-            <SectionTitle aux={<Link to="/v2/feed" className="susu-btn susu-btn-ghost susu-btn-sm">View full feed →</Link>}>
-              Recent activity
+            <SectionTitle aux={<Link to="/v2/feed" className="susu-btn susu-btn-ghost susu-btn-sm">{t("v2.ov.btn.fullFeed")}</Link>}>
+              {t("v2.ov.sec.recent")}
             </SectionTitle>
             {/* Phase 18.2-w (H P1) — Recent activity uses StructuredEventCard:
                 full mono key:value block per event, colour-coded so the
@@ -229,7 +219,7 @@ function OverviewBody() {
                   />
                 ))
               ) : (
-                <div className="susu-empty">No recent activity. Once your daemon sees signals they appear here.</div>
+                <div className="susu-empty">{t("v2.ov.empty.recent")}</div>
               )}
             </div>
           </section>
@@ -252,6 +242,7 @@ function OverviewBody() {
 // the chart. We deliberately keep it factual and short; no editorializing
 // like "great week!" — the data should speak.
 function EquityNarrative({ snapshot }: { snapshot: any }) {
+  const { t } = useLang();
   const { wins, losses, break_even, closed_count, realized_pnl_total, initial_balance_usd } = snapshot;
   if (!closed_count) {
     return (
@@ -261,18 +252,17 @@ function EquityNarrative({ snapshot }: { snapshot: any }) {
         color: "var(--susu-ink-subtle)",
         maxWidth: "60ch",
       }}>
-        No closed trades in this window yet. Once your agent's first trip
-        completes, this line will tell you how it went.
+        {t("v2.ov.narrative.noClosed")}
       </p>
     );
   }
   const pct = (realized_pnl_total / initial_balance_usd) * 100;
   const isUp = realized_pnl_total >= 0;
   const winRate = Math.round((wins / closed_count) * 100);
-  const beClause = break_even > 0 ? `, ${break_even} break-even` : "";
+  const beClause = break_even > 0 ? t("v2.ov.narrative.be", { n: break_even }) : "";
   const trailing = isUp
-    ? (winRate >= 60 ? "The slow drift continues." : "Mixed run — losses outpace wins on count but the dollar tape is up.")
-    : (winRate >= 50 ? "Wins out-number losses but the dollar tape is red — losers ran bigger than winners." : "Rough stretch. Worth pausing to re-check the conv threshold.");
+    ? (winRate >= 60 ? t("v2.ov.narrative.drift") : t("v2.ov.narrative.mixed"))
+    : (winRate >= 50 ? t("v2.ov.narrative.redOk") : t("v2.ov.narrative.rough"));
   return (
     <p style={{
       marginTop: "var(--susu-s-3)",
@@ -281,14 +271,14 @@ function EquityNarrative({ snapshot }: { snapshot: any }) {
       maxWidth: "60ch",
     }}>
       <strong style={{ color: "var(--susu-ink)", fontWeight: 500 }}>
-        {wins} {wins === 1 ? "win" : "wins"}, {losses} {losses === 1 ? "loss" : "losses"}{beClause}
+        {wins} {t(wins === 1 ? "v2.ov.narrative.win.one" : "v2.ov.narrative.win.many")}, {losses} {t(losses === 1 ? "v2.ov.narrative.loss.one" : "v2.ov.narrative.loss.many")}{beClause}
       </strong>{" "}
-      across {closed_count} closed{" "}
-      {closed_count === 1 ? "trade" : "trades"} ·{" "}
+      {t("v2.ov.narrative.across", { n: closed_count })}{" "}
+      {t(closed_count === 1 ? "v2.ov.narrative.trade.one" : "v2.ov.narrative.trade.many")} ·{" "}
       <span style={{ color: isUp ? "var(--susu-pos)" : "var(--susu-neg)" }}>
         {isUp ? "+" : ""}{pct.toFixed(2)}%
       </span>{" "}
-      vs initial. {trailing}
+      {t("v2.ov.narrative.vsInitial")} {trailing}
     </p>
   );
 }
@@ -340,27 +330,28 @@ function PositionRow({ p, mark, now }: { p: Position; mark: number | null; now: 
 }
 
 function AgentStatePanel() {
+  const { t } = useLang();
   const { data: daemon } = useDaemonState();
   const now = useNow();
   if (!daemon) return null;
 
   const rows: Array<[string, React.ReactNode]> = [
-    ["daemon", daemon.status === "online" && daemon.started_at
-      ? <>online · {durationStr(daemon.started_at, now)}</>
+    [t("v2.ov.agent.daemon"), daemon.status === "online" && daemon.started_at
+      ? t("v2.ov.agent.onlineFor", { dur: durationStr(daemon.started_at, now) })
       : daemon.status],
-    ["provider", daemon.provider ?? "—"],
-    ["execution", daemon.execution_mode
+    [t("v2.ov.agent.provider"), daemon.provider ?? "—"],
+    [t("v2.ov.agent.execution"), daemon.execution_mode
       ? <Tag kind={daemon.execution_mode === "live" ? "live" : "paper"}>{daemon.execution_mode.toUpperCase()}</Tag>
       : <span style={{ color: "var(--susu-ink-subtle)" }}>—</span>],
-    ["broker", daemon.broker_connected ? "connected" : <span style={{ color: "var(--susu-ink-subtle)" }}>not connected</span>],
-    ["conv threshold", daemon.conv_threshold != null ? daemon.conv_threshold.toFixed(2) : "—"],
-    ["min size factor", daemon.min_size_factor != null ? daemon.min_size_factor.toFixed(2) : "—"],
-    ["version", daemon.version ? `v${daemon.version}` : "—"],
+    [t("v2.ov.agent.broker"), daemon.broker_connected ? t("v2.ov.agent.brokerConnected") : <span style={{ color: "var(--susu-ink-subtle)" }}>{t("v2.ov.agent.brokerNot")}</span>],
+    [t("v2.ov.agent.conv"), daemon.conv_threshold != null ? daemon.conv_threshold.toFixed(2) : "—"],
+    [t("v2.ov.agent.minSize"), daemon.min_size_factor != null ? daemon.min_size_factor.toFixed(2) : "—"],
+    [t("v2.ov.agent.version"), daemon.version ? `v${daemon.version}` : "—"],
   ];
 
   return (
     <section className="susu-section">
-      <SectionTitle>Agent state</SectionTitle>
+      <SectionTitle>{t("v2.ov.sec.agentState")}</SectionTitle>
       <div className="susu-panel" style={{ padding: "var(--susu-s-3)" }}>
         {rows.map(([k, v]) => (
           <div key={k} style={{
@@ -378,14 +369,15 @@ function AgentStatePanel() {
 }
 
 function TopPeersPanel({ peers }: { peers: any[] }) {
+  const { t } = useLang();
   return (
     <section className="susu-section">
-      <SectionTitle aux={<Link to="/v2/friends" className="susu-btn susu-btn-ghost susu-btn-sm">All →</Link>}>
-        Top peers · 30d
+      <SectionTitle aux={<Link to="/v2/friends" className="susu-btn susu-btn-ghost susu-btn-sm">{t("v2.ov.btn.all")}</Link>}>
+        {t("v2.ov.sec.topPeers")}
       </SectionTitle>
       <div className="susu-panel" style={{ padding: "var(--susu-s-3)" }}>
         {peers.length === 0 ? (
-          <div style={{ color: "var(--susu-ink-subtle)", padding: "var(--susu-s-4)" }}>No peer activity yet.</div>
+          <div style={{ color: "var(--susu-ink-subtle)", padding: "var(--susu-s-4)" }}>{t("v2.ov.empty.peers")}</div>
         ) : peers.slice(0, 6).map((p, i) => (
           <div key={p.address ?? i} style={{
             display: "flex", alignItems: "center", gap: "var(--susu-s-3)",
@@ -395,8 +387,8 @@ function TopPeersPanel({ peers }: { peers: any[] }) {
             <div style={{ flex: 1, minWidth: 0 }}>
               <div className="susu-mono" style={{ fontSize: 12 }}>{p.username ? `@${p.username}` : `${p.address?.slice(0, 6) ?? "—"}…`}</div>
               <div style={{ fontSize: 10, color: "var(--susu-ink-subtle)", fontFamily: "var(--susu-mono)" }}>
-                {p.signal_count} signals
-                {p.accept_rate != null ? ` · ${Math.round(p.accept_rate * 100)}% accept` : ""}
+                {t("v2.ov.peer.signals", { n: p.signal_count })}
+                {p.accept_rate != null ? t("v2.ov.peer.accept", { pct: Math.round(p.accept_rate * 100) }) : ""}
                 {p.top_assets?.length > 0 ? ` · ${p.top_assets.join("/")}` : ""}
               </div>
             </div>
@@ -414,12 +406,13 @@ function TopPeersPanel({ peers }: { peers: any[] }) {
 }
 
 function ChannelsPanel({ channels }: { channels: any[] }) {
+  const { t } = useLang();
   return (
     <section className="susu-section">
-      <SectionTitle aux={`${channels.length} channels`}>Channels</SectionTitle>
+      <SectionTitle aux={t("v2.ov.aux.channels", { n: channels.length })}>{t("v2.ov.sec.channels")}</SectionTitle>
       <div className="susu-panel" style={{ padding: "var(--susu-s-3)" }}>
         {channels.length === 0 ? (
-          <div style={{ color: "var(--susu-ink-subtle)", padding: "var(--susu-s-4)" }}>No channels yet.</div>
+          <div style={{ color: "var(--susu-ink-subtle)", padding: "var(--susu-s-4)" }}>{t("v2.ov.empty.channels")}</div>
         ) : channels.slice(0, 8).map(c => (
           <div key={c.channel_id} style={{
             display: "flex", alignItems: "center", gap: "var(--susu-s-3)",
@@ -429,7 +422,7 @@ function ChannelsPanel({ channels }: { channels: any[] }) {
             <div style={{ flex: 1, minWidth: 0 }}>
               <div className="susu-mono" style={{ fontSize: 12 }}>{c.name ?? c.channel_id.slice(0, 8)}</div>
               <div style={{ fontSize: 10, color: "var(--susu-ink-subtle)", fontFamily: "var(--susu-mono)" }}>
-                {c.member_count} members
+                {t("v2.ov.channel.members", { n: c.member_count })}
               </div>
             </div>
           </div>

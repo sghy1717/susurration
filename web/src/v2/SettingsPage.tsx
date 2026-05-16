@@ -8,16 +8,18 @@ import { Shell } from "./Shell";
 import { useWhoAmI } from "./hooks";
 import { Eyebrow, SectionTitle, ReadOnlyFootnote } from "./components";
 import { api, session } from "../api";
+import { useLang } from "../i18n";
 
 export function SettingsPage() {
   return (
-    <Shell pageLabel="settings">
+    <Shell pageLabel="v2.page.settings">
       <SettingsBody />
     </Shell>
   );
 }
 
 function SettingsBody() {
+  const { t } = useLang();
   const { data: me } = useWhoAmI();
   const [tokenRevealed, setTokenRevealed] = useState(false);
   const [tokenCopied, setTokenCopied] = useState(false);
@@ -44,7 +46,7 @@ function SettingsBody() {
   };
 
   const handleSignOut = () => {
-    if (!confirm("Sign out of this dashboard? Your daemon stays running; only the browser session is cleared.")) return;
+    if (!confirm(t("v2.settings.session.confirm"))) return;
     session.clear();
     window.location.href = "/";
   };
@@ -52,28 +54,26 @@ function SettingsBody() {
   return (
     <>
       <div style={{ marginBottom: "var(--susu-s-6)" }}>
-        <Eyebrow>account · settings</Eyebrow>
-        <h1 className="susu-h1" style={{ marginTop: "var(--susu-s-2)" }}>Settings</h1>
+        <Eyebrow>{t("v2.settings.eyebrow")}</Eyebrow>
+        <h1 className="susu-h1" style={{ marginTop: "var(--susu-s-2)" }}>{t("v2.settings.title")}</h1>
       </div>
 
-      <div style={{
-        display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--susu-s-6)",
-      }}>
+      <div className="susu-grid-11">
         <section className="susu-section">
-          <SectionTitle>Identity</SectionTitle>
+          <SectionTitle>{t("v2.settings.sec.identity")}</SectionTitle>
           <div className="susu-panel" style={{ padding: 0 }}>
-            <Row label="Handle" value={me?.username ? `@${me.username}` : "—"} />
-            <Row label="Address" value={
+            <Row label={t("v2.settings.row.handle")} value={me?.username ? `@${me.username}` : "—"} />
+            <Row label={t("v2.settings.row.address")} value={
               me?.address
                 ? <code style={{ fontSize: 11, color: "var(--susu-ink)" }}>{me.address}</code>
                 : "—"
             } />
-            <Row label="Daemon version" value={me?.last_daemon_version ? `v${me.last_daemon_version}` : "—"} />
+            <Row label={t("v2.settings.row.version")} value={me?.last_daemon_version ? `v${me.last_daemon_version}` : "—"} />
           </div>
         </section>
 
         <section className="susu-section">
-          <SectionTitle>API token</SectionTitle>
+          <SectionTitle>{t("v2.settings.sec.token")}</SectionTitle>
           <div className="susu-panel" style={{ padding: "var(--susu-s-4)" }}>
             <div style={{
               display: "flex", alignItems: "center", justifyContent: "space-between", gap: "var(--susu-s-3)",
@@ -91,17 +91,17 @@ function SettingsBody() {
                 <button
                   className="susu-btn susu-btn-ghost susu-btn-sm"
                   onClick={() => setTokenRevealed(v => !v)}
-                  title={tokenRevealed ? "Hide" : "Reveal"}
+                  title={tokenRevealed ? t("v2.settings.token.hide") : t("v2.settings.token.reveal")}
                 >
-                  {tokenRevealed ? "Hide" : "Reveal"}
+                  {tokenRevealed ? t("v2.settings.token.hide") : t("v2.settings.token.reveal")}
                 </button>
                 <button
                   className="susu-btn susu-btn-sm"
                   onClick={copyToken}
                   disabled={!token}
-                  title="Copy full token to clipboard"
+                  title={t("v2.settings.token.copyTitle")}
                 >
-                  {tokenCopied ? "✓ Copied" : "Copy"}
+                  {tokenCopied ? t("v2.settings.token.copied") : t("v2.settings.token.copy")}
                 </button>
               </span>
             </div>
@@ -109,18 +109,16 @@ function SettingsBody() {
               marginTop: "var(--susu-s-3)",
               fontSize: 11, color: "var(--susu-ink-subtle)", lineHeight: 1.5,
             }}>
-              Pass this to <code>npx -y @susurration/installer install --token &lt;token&gt;</code> on a
-              new machine to wire up its daemon. Anyone with the token can act
-              as you — don't paste it into chat or logs.
+              {t("v2.settings.token.help.pre")}<code>npx -y @susurration/installer install --token &lt;token&gt;</code>{t("v2.settings.token.help.post")}
             </p>
           </div>
         </section>
 
         <section className="susu-section">
-          <SectionTitle>Webhook</SectionTitle>
+          <SectionTitle>{t("v2.settings.sec.webhook")}</SectionTitle>
           <div className="susu-panel" style={{ padding: "var(--susu-s-4)" }}>
             {webhookLoading ? (
-              <span style={{ color: "var(--susu-ink-subtle)" }}>loading…</span>
+              <span style={{ color: "var(--susu-ink-subtle)" }}>{t("v2.settings.webhook.loading")}</span>
             ) : webhookUrl ? (
               <>
                 <code style={{
@@ -132,30 +130,25 @@ function SettingsBody() {
                   {webhookUrl}
                 </code>
                 <p style={{ fontSize: 11, color: "var(--susu-ink-subtle)", lineHeight: 1.5 }}>
-                  Server POSTs every incoming signal + reaction to this URL.
-                  Manage with the CLI: <code>susu webhook set &lt;url&gt;</code> / <code>susu webhook clear</code>.
+                  {t("v2.settings.webhook.help.pre")}<code>susu webhook set &lt;url&gt;</code>{t("v2.settings.webhook.help.or")}<code>susu webhook clear</code>{t("v2.settings.webhook.help.suffix")}
                 </p>
               </>
             ) : (
               <p style={{ fontSize: 12, color: "var(--susu-ink-subtle)", lineHeight: 1.5 }}>
-                No webhook configured. Optional integration point if you want
-                signals POSTed somewhere besides your daemon — Slack relay,
-                custom logger, etc. Set with <code>susu webhook set &lt;url&gt;</code>.
+                {t("v2.settings.webhook.none")}<code>susu webhook set &lt;url&gt;</code>{t("v2.settings.webhook.none.suffix")}
               </p>
             )}
           </div>
         </section>
 
         <section className="susu-section">
-          <SectionTitle>Session</SectionTitle>
+          <SectionTitle>{t("v2.settings.sec.session")}</SectionTitle>
           <div className="susu-panel" style={{ padding: "var(--susu-s-4)" }}>
             <p style={{ fontSize: 12, color: "var(--susu-ink-subtle)", lineHeight: 1.5, marginBottom: "var(--susu-s-3)" }}>
-              Clears your token from this browser only. The daemon on your
-              machine keeps running with the same token; sign back in on
-              another device by pasting the token from above.
+              {t("v2.settings.session.help")}
             </p>
             <button className="susu-btn susu-btn-ghost" onClick={handleSignOut}>
-              Sign out
+              {t("v2.settings.session.signOut")}
             </button>
           </div>
         </section>

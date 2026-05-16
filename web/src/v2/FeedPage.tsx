@@ -10,6 +10,7 @@ import {
 import {
   Eyebrow, Tag, formatClock, formatRelative,
 } from "./components";
+import { useLang } from "../i18n";
 
 type Filter = "all" | "signals" | "react_plus" | "react_minus" | "opened" | "closed";
 
@@ -24,10 +25,10 @@ function reactionPolarity(payload: any): "plus" | "minus" | null {
 }
 
 export function FeedPage() {
+  const { t } = useLang();
   // Phase 18.2-w perf — bootstrap with 50 rows for fast first paint
   // (~80ms server + small parse), then on-demand "Load older" pulls
-  // a deeper window. Previously 200 rows = 276KB JSON + render =
-  // sluggish landing from /v2/overview "View full feed →".
+  // a deeper window.
   const [limit, setLimit] = useState(50);
   const { data: feed, loading } = useSignalFeed(limit);
   const sse = useFeedSSE(feed?.signals ?? []);
@@ -76,27 +77,26 @@ export function FeedPage() {
 
   return (
     <Shell
-      pageLabel="signal feed"
+      pageLabel="v2.page.feed"
       topbarAux={
         <>
-          <span>streaming · {counts.all}/24h</span>
+          <span>{t("v2.feed.streaming", { n: counts.all })}</span>
           <span style={{ opacity: 0.4 }}>·</span>
           <span style={{ color: sse.status === "open" ? "var(--susu-pos)" : "var(--susu-warn)" }}>
-            sse {sse.status}
+            {t("v2.feed.sse", { status: sse.status })}
           </span>
         </>
       }
     >
       <div style={{ marginBottom: "var(--susu-s-5)" }}>
-        <Eyebrow>Real-time · across all channels</Eyebrow>
-        <h1 className="susu-h2" style={{ marginTop: "var(--susu-s-2)" }}>Every signal your agent saw.</h1>
+        <Eyebrow>{t("v2.feed.eyebrow")}</Eyebrow>
+        <h1 className="susu-h2" style={{ marginTop: "var(--susu-s-2)" }}>{t("v2.feed.h1")}</h1>
         <p className="susu-body" style={{ marginTop: "var(--susu-s-2)", maxWidth: "56ch" }}>
-          Each row is one event from a peer agent. Filter by reaction outcome
-          to inspect what your daemon kept vs skipped.
+          {t("v2.feed.intro")}
         </p>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: "var(--susu-s-6)" }}>
+      <div className="susu-grid-feed">
         <div>
           <div className="susu-panel">
             <div className="filter-bar" style={{
@@ -105,24 +105,20 @@ export function FeedPage() {
               borderBottom: "1px solid var(--susu-hairline)",
               alignItems: "center",
             }}>
-              <Chip on={filter === "all"}        onClick={() => setFilter("all")}>All <Count>{counts.all}</Count></Chip>
-              <Chip on={filter === "signals"}    onClick={() => setFilter("signals")}>Signals <Count>{counts.signals}</Count></Chip>
-              <Chip on={filter === "react_plus"} onClick={() => setFilter("react_plus")}>Reacted +1 <Count>{counts.react_plus}</Count></Chip>
-              <Chip on={filter === "react_minus"}onClick={() => setFilter("react_minus")}>Reacted -1 <Count>{counts.react_minus}</Count></Chip>
-              <Chip on={filter === "opened"}     onClick={() => setFilter("opened")}>Opened <Count>{counts.opened}</Count></Chip>
-              <Chip on={filter === "closed"}     onClick={() => setFilter("closed")}>Closed <Count>{counts.closed}</Count></Chip>
+              <Chip on={filter === "all"}        onClick={() => setFilter("all")}>{t("v2.feed.chip.all")} <Count>{counts.all}</Count></Chip>
+              <Chip on={filter === "signals"}    onClick={() => setFilter("signals")}>{t("v2.feed.chip.signals")} <Count>{counts.signals}</Count></Chip>
+              <Chip on={filter === "react_plus"} onClick={() => setFilter("react_plus")}>{t("v2.feed.chip.plus")} <Count>{counts.react_plus}</Count></Chip>
+              <Chip on={filter === "react_minus"}onClick={() => setFilter("react_minus")}>{t("v2.feed.chip.minus")} <Count>{counts.react_minus}</Count></Chip>
+              <Chip on={filter === "opened"}     onClick={() => setFilter("opened")}>{t("v2.feed.chip.opened")} <Count>{counts.opened}</Count></Chip>
+              <Chip on={filter === "closed"}     onClick={() => setFilter("closed")}>{t("v2.feed.chip.closed")} <Count>{counts.closed}</Count></Chip>
               <div style={{ flex: 1 }} />
-              <span style={{ fontFamily: "var(--susu-mono)", fontSize: 11, color: "var(--susu-ink-subtle)" }}>last 24h</span>
+              <span style={{ fontFamily: "var(--susu-mono)", fontSize: 11, color: "var(--susu-ink-subtle)" }}>{t("v2.feed.last24h")}</span>
             </div>
             {filtered.length === 0 ? (
               loading ? (
-                // Skeleton rows so the user sees structure during the
-                // first-paint fetch instead of a single "loading…" line.
-                // Subsequent polls don't flip loading back to true so
-                // these only appear on the very first load.
                 <>{Array.from({ length: 6 }).map((_, i) => <FeedSkeletonRow key={i} />)}</>
               ) : (
-                <div className="susu-empty">No events match this filter.</div>
+                <div className="susu-empty">{t("v2.feed.empty")}</div>
               )
             ) : (
               <>
@@ -135,7 +131,7 @@ export function FeedPage() {
                       className="susu-btn susu-btn-ghost"
                       onClick={() => setLimit(200)}
                     >
-                      Load older events
+                      {t("v2.feed.loadOlder")}
                     </button>
                   </div>
                 )}
@@ -276,6 +272,7 @@ function Payload({ payload }: { payload: any }) {
 }
 
 function PayloadRow({ k, v }: { k: string; v: any }) {
+  const { t } = useLang();
   const rendered = typeof v === "object" ? JSON.stringify(v) : String(v);
   const isLong = rendered.length > 120;
   const [expanded, setExpanded] = useState(false);
@@ -301,7 +298,7 @@ function PayloadRow({ k, v }: { k: string; v: any }) {
             textUnderlineOffset: 2,
           }}
         >
-          {expanded ? "Show less" : "Show more"}
+          {expanded ? t("v2.feed.showLess") : t("v2.feed.showMore")}
         </button>
       )}
     </div>
@@ -309,18 +306,19 @@ function PayloadRow({ k, v }: { k: string; v: any }) {
 }
 
 function SummaryRail({ snapshot, counts }: { snapshot: any; counts: any }) {
+  const { t } = useLang();
   return (
     <section className="susu-section">
       <div className="susu-section-head">
-        <div className="susu-section-title">24h book</div>
+        <div className="susu-section-title">{t("v2.feed.rail.24hBook")}</div>
       </div>
       <div className="susu-panel" style={{ padding: "var(--susu-s-3)" }}>
-        <SummaryLine label="Signals received" value={snapshot?.signals_received_24h ?? counts.signals} />
-        <SummaryLine label="Accepted (≥1 react)" value={snapshot?.accepted_24h ?? "—"} />
-        <SummaryLine label="React +1" value={counts.react_plus} />
-        <SummaryLine label="React -1" value={counts.react_minus} />
-        <SummaryLine label="Opened" value={counts.opened} />
-        <SummaryLine label="Closed" value={counts.closed} />
+        <SummaryLine label={t("v2.feed.rail.received")} value={snapshot?.signals_received_24h ?? counts.signals} />
+        <SummaryLine label={t("v2.feed.rail.accepted")} value={snapshot?.accepted_24h ?? "—"} />
+        <SummaryLine label={t("v2.feed.rail.plus")} value={counts.react_plus} />
+        <SummaryLine label={t("v2.feed.rail.minus")} value={counts.react_minus} />
+        <SummaryLine label={t("v2.feed.rail.opened")} value={counts.opened} />
+        <SummaryLine label={t("v2.feed.rail.closed")} value={counts.closed} />
       </div>
     </section>
   );
@@ -340,14 +338,15 @@ function SummaryLine({ label, value }: { label: string; value: React.ReactNode }
 }
 
 function ByPeerRail({ rows }: { rows: [string, { username: string | null; count: number }][] }) {
+  const { t } = useLang();
   return (
     <section className="susu-section">
       <div className="susu-section-head">
-        <div className="susu-section-title">By peer · 24h</div>
+        <div className="susu-section-title">{t("v2.feed.rail.byPeer")}</div>
       </div>
       <div className="susu-panel" style={{ padding: "var(--susu-s-3)" }}>
         {rows.length === 0 ? (
-          <div style={{ color: "var(--susu-ink-subtle)", padding: "var(--susu-s-3)" }}>No peer activity in 24h.</div>
+          <div style={{ color: "var(--susu-ink-subtle)", padding: "var(--susu-s-3)" }}>{t("v2.feed.rail.byPeer.empty")}</div>
         ) : rows.map(([k, r]) => (
           <SummaryLine
             key={k}

@@ -10,75 +10,79 @@
 import { Shell } from "./Shell";
 import { useDaemonState } from "./hooks";
 import { Eyebrow, SectionTitle, Tag, ReadOnlyFootnote } from "./components";
+import { useLang } from "../i18n";
 
 export function RiskPage() {
   return (
-    <Shell pageLabel="risk caps">
+    <Shell pageLabel="v2.page.risk">
       <RiskBody />
     </Shell>
   );
 }
 
 function RiskBody() {
+  const { t } = useLang();
   const { data: d } = useDaemonState();
 
   const filterRows: Array<[string, React.ReactNode, string]> = [
     [
-      "min size factor",
+      t("v2.risk.row.minSize"),
       d?.min_size_factor != null ? d.min_size_factor.toFixed(2) : "—",
-      "Lower bound on conviction (size_factor) the agent must report when accepting a signal — below this, the daemon refuses to open a paper position even if the agent agreed. Default 0.5.",
+      t("v2.risk.hint.minSize"),
     ],
     [
-      "conv threshold",
+      t("v2.risk.row.conv"),
       d?.conv_threshold != null ? d.conv_threshold.toFixed(2) : "—",
-      "Minimum signal-level confidence (0–1) the daemon will dispatch on. Cheaper than rate-limiting your IDE-agent: low-confidence signals never reach the agent at all.",
+      t("v2.risk.hint.conv"),
     ],
   ];
 
   const executionRows: Array<[string, React.ReactNode, string]> = [
     [
-      "execution mode",
+      t("v2.risk.row.execMode"),
       d?.execution_mode
         ? <Tag kind={d.execution_mode === "live" ? "live" : "paper"}>{d.execution_mode.toUpperCase()}</Tag>
         : <span style={{ color: "var(--susu-ink-subtle)" }}>—</span>,
-      "paper: positions live only in susurration's simulator. live: the agent has a broker MCP wired up and is reporting real broker fills back via susu_position_close.",
+      t("v2.risk.hint.execMode"),
     ],
     [
-      "broker connected",
-      d?.broker_connected ? "yes" : <span style={{ color: "var(--susu-ink-subtle)" }}>no</span>,
-      "Whether the agent has a broker tool in its allowed-tools list. v0.0.x deliberately reports false; agent's broker MCP is opt-in via the user's CLAUDE.md.",
+      t("v2.risk.row.broker"),
+      d?.broker_connected ? t("v2.risk.bool.yes") : <span style={{ color: "var(--susu-ink-subtle)" }}>{t("v2.risk.bool.no")}</span>,
+      t("v2.risk.hint.broker"),
     ],
   ];
+
+  // Render `intro` with a {file} placeholder swapped for a <code> chunk.
+  // We split on the placeholder so the translation can move the variable
+  // freely without breaking JSX.
+  const introTpl = t("v2.risk.intro", { file: "%%FILE%%" });
+  const [introBefore, introAfter = ""] = introTpl.split("%%FILE%%");
 
   return (
     <>
       <div style={{ marginBottom: "var(--susu-s-6)" }}>
-        <Eyebrow>agent · risk caps</Eyebrow>
+        <Eyebrow>{t("v2.risk.eyebrow")}</Eyebrow>
         <h1 className="susu-h1" style={{ marginTop: "var(--susu-s-2)" }}>
-          Risk caps
+          {t("v2.risk.title")}
         </h1>
         <p style={{
           marginTop: "var(--susu-s-3)", maxWidth: 720,
           color: "var(--susu-ink-subtle)", fontFamily: "var(--susu-mono)", fontSize: 12,
           lineHeight: 1.6,
         }}>
-          Read-only mirror of your daemon's <code>~/.susu/agent-config.json</code>.
-          Changes happen on your machine, not here — edit the file and the
-          daemon will push the new snapshot on its next 30-min ping. (Wanting
-          inline editing? Phase 18.3+; for now this is honest about being a
-          mirror.)
+          {introBefore}
+          <code>~/.susu/agent-config.json</code>
+          {introAfter}
         </p>
       </div>
 
-      <div style={{
-        display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--susu-s-6)",
-      }}>
+      <div className="susu-grid-11">
         <section className="susu-section">
-          <SectionTitle>Signal filtering</SectionTitle>
+          <SectionTitle>{t("v2.risk.sec.filter")}</SectionTitle>
           <RiskList rows={filterRows} />
         </section>
         <section className="susu-section">
-          <SectionTitle>Execution</SectionTitle>
+          <SectionTitle>{t("v2.risk.sec.execution")}</SectionTitle>
           <RiskList rows={executionRows} />
         </section>
       </div>

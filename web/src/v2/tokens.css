@@ -583,3 +583,178 @@ code, pre, kbd {
   .susu-signal-card.fresh { animation: none !important; }
   .susu-tick { animation: none !important; }
 }
+
+/* ── Responsive grid utilities ────────────────────────────────
+   Page bodies use these classes instead of hard-coded
+   grid-template-columns so the H5 breakpoint can collapse them
+   to a single column without per-page edits. */
+.susu-grid-21      { display: grid; grid-template-columns: 2fr 1fr; gap: var(--susu-s-6); }
+.susu-grid-11      { display: grid; grid-template-columns: 1fr 1fr; gap: var(--susu-s-6); }
+.susu-grid-sidebar { display: grid; grid-template-columns: 320px 1fr; gap: var(--susu-s-6); }
+.susu-grid-feed    { display: grid; grid-template-columns: 1fr 280px; gap: var(--susu-s-6); }
+
+/* Stat cells row (e.g. FriendsPage peer detail header) — 4 columns
+   on desktop, 2x2 on tablet/H5, 1 column on phones below 480px. */
+.susu-stat-grid-4 {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+}
+
+/* Hero row: title left + actions right; stacks below 600px */
+.susu-page-hero {
+  display: flex; align-items: flex-end; justify-content: space-between;
+  gap: var(--susu-s-4);
+  margin-bottom: var(--susu-s-6);
+}
+.susu-page-hero-actions {
+  display: flex; gap: var(--susu-s-3); flex-shrink: 0; align-items: center;
+}
+
+/* Mobile hamburger button — hidden on desktop, shown on H5 */
+.susu-rail-toggle {
+  display: none;
+  width: 36px; height: 36px;
+  border-radius: var(--susu-r-sm);
+  background: transparent;
+  border: 1px solid var(--susu-hairline-strong);
+  color: var(--susu-ink-muted);
+  align-items: center; justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.susu-rail-toggle:hover { background: var(--susu-surface-1); color: var(--susu-ink); }
+
+/* Language toggle pill — sits in topbar on every v2 page */
+.susu-lang-toggle {
+  background: transparent;
+  border: 1px solid var(--susu-hairline-strong);
+  border-radius: var(--susu-r-sm);
+  font-family: var(--susu-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--susu-ink-muted);
+  padding: 4px 8px;
+  height: 28px;
+  cursor: pointer;
+  transition: color var(--susu-fast), border-color var(--susu-fast), background var(--susu-fast);
+  flex-shrink: 0;
+}
+.susu-lang-toggle:hover {
+  color: var(--susu-ink);
+  border-color: var(--susu-hairline-emphasis);
+  background: var(--susu-surface-1);
+}
+
+/* Backdrop shown when rail is open in mobile drawer mode */
+.susu-rail-backdrop {
+  display: none;
+  position: fixed; inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 40;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   H5 / Mobile breakpoint
+   ───────────────────────────────────────────────────────────── */
+@media (max-width: 900px) {
+  /* Shell: rail becomes off-canvas drawer */
+  .susu-shell { grid-template-columns: 1fr; }
+  .susu-rail {
+    position: fixed;
+    top: 0; left: 0;
+    width: 280px;
+    height: 100dvh;
+    z-index: 50;
+    transform: translateX(-105%);
+    transition: transform var(--susu-base) var(--susu-ease);
+    box-shadow: 8px 0 24px rgba(0, 0, 0, 0.5);
+    background: var(--susu-canvas);
+  }
+  .susu-shell.rail-open .susu-rail { transform: translateX(0); }
+  .susu-shell.rail-open .susu-rail-backdrop { display: block; }
+
+  .susu-rail-toggle { display: inline-flex; }
+
+  /* Topbar: tighter padding, allow status group to wrap onto next line */
+  .susu-topbar {
+    padding: 0 var(--susu-s-3);
+    gap: var(--susu-s-2);
+    height: auto;
+    min-height: 56px;
+    flex-wrap: wrap;
+    padding-top: var(--susu-s-2);
+    padding-bottom: var(--susu-s-2);
+  }
+  .susu-topbar-crumb { font-size: var(--susu-text-sm); }
+
+  /* Content + grid collapses */
+  .susu-content { padding: var(--susu-s-4); }
+  .susu-grid-21,
+  .susu-grid-11,
+  .susu-grid-sidebar,
+  .susu-grid-feed {
+    grid-template-columns: 1fr;
+    gap: var(--susu-s-5);
+  }
+
+  .susu-stat-grid-4 { grid-template-columns: 1fr 1fr; }
+  .susu-stat-grid-4 > *:nth-child(2n) { border-right: none !important; }
+  .susu-stat-grid-4 > *:nth-child(-n+2) { border-bottom: 1px solid var(--susu-hairline); }
+
+  /* KPI strip: 4 cells → 2x2 grid with internal dividers */
+  .susu-kpi-strip {
+    grid-template-columns: 1fr 1fr;
+  }
+  .susu-kpi { padding: var(--susu-s-4); }
+  .susu-kpi:nth-child(2n) { border-right: none; }
+  .susu-kpi:nth-child(-n+2) { border-bottom: 1px solid var(--susu-hairline); }
+  .susu-kpi-value { font-size: 20px; }
+
+  /* Hero: stack title above actions */
+  .susu-page-hero {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--susu-s-3);
+  }
+  .susu-page-hero-actions {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  /* Section spacing */
+  .susu-section { margin-bottom: var(--susu-s-6); }
+
+  /* Tables: allow horizontal scroll so dense data doesn't break layout */
+  .susu-panel { overflow-x: auto; }
+  .susu-table { min-width: 560px; }
+
+  /* Feed rows: compress timestamp column + drop right side rail */
+  .susu-feed-row {
+    grid-template-columns: 60px 1fr !important;
+    padding: var(--susu-s-3);
+    gap: var(--susu-s-3);
+  }
+  .susu-feed-side { display: none; }
+
+  /* Wordmark a bit smaller on mobile so brand + crumb fit on one line */
+  .susu-wordmark.lg { font-size: 16px; letter-spacing: 0.18em; }
+  .susu-brand { margin-bottom: var(--susu-s-3); padding: var(--susu-s-2); }
+
+  /* Hero typography one notch smaller */
+  .susu-h1 { font-size: 28px; }
+  .susu-h2 { font-size: 22px; }
+  .susu-display { font-size: 36px; }
+}
+
+/* Extra-small: phones below 480px */
+@media (max-width: 480px) {
+  .susu-kpi-strip { grid-template-columns: 1fr; }
+  .susu-kpi:nth-child(n) { border-right: none; border-bottom: 1px solid var(--susu-hairline); }
+  .susu-kpi:last-child { border-bottom: none; }
+  .susu-h1 { font-size: 24px; }
+  .susu-content { padding: var(--susu-s-3); }
+
+  .susu-stat-grid-4 { grid-template-columns: 1fr; }
+  .susu-stat-grid-4 > *:nth-child(n) { border-right: none !important; border-bottom: 1px solid var(--susu-hairline); }
+  .susu-stat-grid-4 > *:last-child { border-bottom: none; }
+}

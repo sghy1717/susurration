@@ -2,6 +2,7 @@
 // Token classes (susu-*) come from tokens.css imported at the page level.
 
 import { useEffect, useRef, type CSSProperties, type ReactNode } from "react";
+import { useLang } from "../i18n";
 
 // ── Brand wordmark ───────────────────────────────────────────────────────
 
@@ -182,10 +183,11 @@ export function ModeFilterPill({
   onChange: (next: ModePillValue) => void;
   size?: "sm" | "md";
 }) {
+  const { t } = useLang();
   const items: { v: ModePillValue; label: string; title: string }[] = [
-    { v: "all", label: "ALL", title: "Both paper and live positions combined" },
-    { v: "paper", label: "PAPER", title: "Susurration's built-in simulator" },
-    { v: "live", label: "LIVE", title: "Real broker trades reported by the agent" },
+    { v: "all", label: "ALL", title: t("v2.modePill.title.all") },
+    { v: "paper", label: "PAPER", title: t("v2.modePill.title.paper") },
+    { v: "live", label: "LIVE", title: t("v2.modePill.title.live") },
   ];
   // Phase 18.2-w UX pass — mode toggle now uses the same outlined-pill
   // primitive as the 21d / 7d / 24h time-range row next to it (active =
@@ -196,7 +198,7 @@ export function ModeFilterPill({
   return (
     <div
       role="tablist"
-      aria-label="Book mode filter"
+      aria-label={t("v2.modePill.aria")}
       style={{
         display: "inline-flex",
         gap: 2,
@@ -246,21 +248,18 @@ export function UpgradeBanner({
   status: UpgradeStatus;
   onDismiss: () => void;
 }) {
+  const { t } = useLang();
   if (!status.needsUpgrade) return null;
 
   const { state, error, currentVersion, latestVersion, triggerUpgrade } = status;
 
-  // One button, one trigger. Lazy probe means the label can stay neutral
-  // ("Upgrade") on idle — we only know whether this turns into a real
-  // one-click or a clipboard copy after the user opts in. State labels
-  // narrate after that decision.
   let buttonLabel: string;
-  if (state === "upgrading")    buttonLabel = "Upgrading…";
-  else if (state === "polling") buttonLabel = "Restarting daemon…";
-  else if (state === "done")    buttonLabel = "✓ Upgraded";
-  else if (state === "copied")  buttonLabel = "✓ Copied — paste in terminal";
-  else if (state === "error")   buttonLabel = "Try again";
-  else                          buttonLabel = "Upgrade";
+  if (state === "upgrading")    buttonLabel = t("v2.upgrade.btn.upgrading");
+  else if (state === "polling") buttonLabel = t("v2.upgrade.btn.restarting");
+  else if (state === "done")    buttonLabel = t("v2.upgrade.btn.done");
+  else if (state === "copied")  buttonLabel = t("v2.upgrade.btn.copied");
+  else if (state === "error")   buttonLabel = t("v2.upgrade.btn.retry");
+  else                          buttonLabel = t("v2.upgrade.btn.upgrade");
 
   const busy = state === "upgrading" || state === "polling";
   const successTone = state === "done" || state === "copied";
@@ -300,11 +299,12 @@ export function UpgradeBanner({
         }}
       />
       <span style={{ color: "var(--susu-ink-subtle)" }}>
-        Daemon{" "}
+        {t("v2.upgrade.daemon.prefix")}
         <strong style={{ color: "var(--susu-ink)" }}>
           v{currentVersion ?? "?"}
-        </strong>{" "}
-        → <strong style={{ color: "var(--susu-ink)" }}>v{latestVersion}</strong>
+        </strong>
+        {t("v2.upgrade.arrow")}
+        <strong style={{ color: "var(--susu-ink)" }}>v{latestVersion}</strong>
       </span>
 
       <button
@@ -323,7 +323,7 @@ export function UpgradeBanner({
           opacity: busy ? 0.7 : 1,
           transition: "background-color 160ms ease, color 160ms ease, opacity 160ms ease",
         }}
-        title="Click to upgrade. If your daemon is on this machine and reachable, it will self-upgrade; otherwise the installer command is copied to your clipboard."
+        title={t("v2.upgrade.btn.title")}
       >
         {buttonLabel}
       </button>
@@ -345,8 +345,8 @@ export function UpgradeBanner({
 
       <button
         onClick={onDismiss}
-        aria-label="Dismiss upgrade banner"
-        title="Dismiss until next refresh"
+        aria-label={t("v2.upgrade.dismiss.aria")}
+        title={t("v2.upgrade.dismiss.title")}
         style={{
           border: "none",
           background: "transparent",
@@ -797,7 +797,7 @@ export function EquityCurve({
   height = 180,
   primaryColor = PRIMARY_COLOR,
   primaryLabel,
-  secondaryLabel = "live",
+  secondaryLabel,
 }: {
   points: { day: string; realized_cumulative_usd: number }[];
   /** Optional second series, rendered as a lighter overlay. */
@@ -811,10 +811,12 @@ export function EquityCurve({
   /** Inline legend chip for secondary. */
   secondaryLabel?: string;
 }) {
+  const { t } = useLang();
+  const secondaryLabelResolved = secondaryLabel ?? t("v2.equity.legend.live");
   if (points.length === 0 && (!secondaryPoints || secondaryPoints.length === 0)) {
     return (
       <div className="susu-panel" style={{ padding: "var(--susu-s-5)", color: "var(--susu-ink-subtle)" }}>
-        No history yet — your agent's first closed position will populate this curve.
+        {t("v2.equity.empty")}
       </div>
     );
   }
@@ -881,14 +883,17 @@ export function EquityCurve({
           fontFamily: "var(--susu-mono)", fontSize: 11, color: "var(--susu-ink-subtle)",
         }}>
           <span>
-            ${initialBalance.toLocaleString()} → ${lastBalance.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-            {" · "}{labelDays} days
-            {ddPercent < 0 ? ` · max DD ${ddPercent.toFixed(2)}%` : ""}
+            {t("v2.equity.summary", {
+              init: "$" + initialBalance.toLocaleString(),
+              last: "$" + lastBalance.toLocaleString(undefined, { maximumFractionDigits: 0 }),
+              n: labelDays,
+            })}
+            {ddPercent < 0 ? t("v2.equity.maxDD", { pct: ddPercent.toFixed(2) }) : ""}
           </span>
           {showLegend && (
             <span style={{ display: "flex", gap: "var(--susu-s-3)" }}>
               <LegendChip color={primaryColor} label={primaryLabel!} />
-              <LegendChip color={SECONDARY_COLOR} label={secondaryLabel} />
+              <LegendChip color={SECONDARY_COLOR} label={secondaryLabelResolved} />
             </span>
           )}
         </div>
@@ -943,7 +948,7 @@ export function EquityCurve({
               {points.length > 6 && <span>{formatDay(points[Math.floor(points.length * 0.25)]!.day)}</span>}
               {points.length > 4 && <span>{formatDay(points[Math.floor(points.length * 0.5)]!.day)}</span>}
               {points.length > 6 && <span>{formatDay(points[Math.floor(points.length * 0.75)]!.day)}</span>}
-              <span>Today</span>
+              <span>{t("v2.equity.today")}</span>
             </>
           )}
         </div>
@@ -1003,6 +1008,7 @@ export function SectionTitle({ children, aux }: { children: ReactNode; aux?: Rea
 }
 
 export function ReadOnlyFootnote() {
+  const { t } = useLang();
   return (
     <p style={{
       marginTop: "var(--susu-s-5)",
@@ -1011,7 +1017,7 @@ export function ReadOnlyFootnote() {
       color: "var(--susu-ink-faint)",
       lineHeight: 1.6,
     }}>
-      All actions push / react / open / close happen via your daemon and broker — this is a read-only view.
+      {t("v2.footnote.readonly")}
     </p>
   );
 }
