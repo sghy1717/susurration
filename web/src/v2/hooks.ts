@@ -174,45 +174,84 @@ export interface WhoAmI {
 export interface Prices { prices: Record<string, number>; }
 
 // ── generic poll hook ────────────────────────────────────────────────────
+//
+// Phase 18.2-w perf — module-level cache keyed by path implements SWR
+// (stale-while-revalidate): switching v2 tabs no longer wipes data + shows
+// "loading…" while the next fetch round-trips. New hook instance reads
+// last-known data instantly, then fetches in the background and updates.
+// In-flight requests are deduplicated by path so two components mounting
+// at the same time hit the network once.
+//
+// Cache survives across route changes for the lifetime of the page. Token
+// changes (sign-out) wipe it via api.session.clear → see api.ts.
+
+const pollCache = new Map<string, { data: unknown; ts: number }>();
+const inflight = new Map<string, Promise<unknown>>();
+
+export function clearPollCache(): void { pollCache.clear(); inflight.clear(); }
+// Expose on window so api.ts session.clear can drop our cache without
+// a circular import at module-load time.
+if (typeof window !== "undefined") {
+  (window as any).__susuClearPollCache = clearPollCache;
+}
 
 function usePoll<T>(
   path: string | null,
   intervalMs: number,
   enabled: boolean = true,
 ): { data: T | null; error: ApiError | null; loading: boolean; refetch: () => void } {
-  const [data, setData] = useState<T | null>(null);
+  // Seed state from cache so a fresh-mount component renders prior data
+  // immediately instead of flashing a loading state.
+  const cached = path ? (pollCache.get(path)?.data as T | undefined) : undefined;
+  const [data, setData] = useState<T | null>(cached ?? null);
   const [error, setError] = useState<ApiError | null>(null);
-  const [loading, setLoading] = useState(true);
-  const abortRef = useRef<AbortController | null>(null);
-  const tickRef = useRef(0);
+  const [loading, setLoading] = useState<boolean>(cached === undefined);
+  // mountedRef guards setState calls from in-flight fetches that resolve
+  // after the component unmounts (common on rapid tab switches now that
+  // the cache makes navigation feel instant). Without it React warns
+  // "state update on a component that hasn't mounted yet" and burns CPU
+  // on phantom re-renders.
+  const mountedRef = useRef(true);
 
   const fetchOnce = useCallback(async () => {
     if (!path || !enabled) return;
-    abortRef.current?.abort();
-    const ctl = new AbortController();
-    abortRef.current = ctl;
-    const tick = ++tickRef.current;
+    // Dedupe: if another component already has an in-flight request for
+    // this path, attach to it instead of issuing a parallel call.
+    let pending = inflight.get(path) as Promise<T> | undefined;
+    if (!pending) {
+      pending = api<T>({ path });
+      inflight.set(path, pending as Promise<unknown>);
+      pending.finally(() => {
+        if (inflight.get(path) === pending) inflight.delete(path);
+      });
+    }
     try {
-      const res = await api<T>({ path });
-      if (tick !== tickRef.current) return; // stale
+      const res = await pending;
+      pollCache.set(path, { data: res, ts: Date.now() });
+      if (!mountedRef.current) return;
       setData(res);
       setError(null);
     } catch (e) {
-      if (tick !== tickRef.current) return;
+      if (!mountedRef.current) return;
       if (e instanceof ApiError) setError(e);
       else setError(new ApiError(0, String(e), path));
     } finally {
-      if (tick === tickRef.current) setLoading(false);
+      if (mountedRef.current) setLoading(false);
     }
   }, [path, enabled]);
 
   useEffect(() => {
+    mountedRef.current = true;
     if (!path || !enabled) return;
+    if (pollCache.has(path)) {
+      setData(pollCache.get(path)!.data as T);
+      setLoading(false);
+    }
     fetchOnce();
     const id = setInterval(fetchOnce, intervalMs);
     return () => {
+      mountedRef.current = false;
       clearInterval(id);
-      abortRef.current?.abort();
     };
   }, [path, intervalMs, enabled, fetchOnce]);
 

@@ -4,7 +4,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { ModePill, StatusDot, UpgradeBanner, Wordmark } from "./components";
-import { useDaemonState, useDaemonUpgrade, useWhoAmI, useBookSnapshot, durationStr, formatMoney } from "./hooks";
+import { useDaemonState, useDaemonUpgrade, useWhoAmI, durationStr } from "./hooks";
 
 interface ShellProps {
   pageLabel: string;            // shown in topbar after `susurration/`
@@ -26,10 +26,7 @@ function useNow(intervalMs: number = 1000): number {
 export function Shell({ pageLabel, topbarAux, topbarActions, children }: ShellProps) {
   const { data: daemon } = useDaemonState();
   const { data: me } = useWhoAmI();
-  const { data: snapshot } = useBookSnapshot();
   const now = useNow();
-  const executionMode = daemon?.execution_mode ?? "paper";
-  const bookBalance = snapshot ? snapshot.initial_balance_usd + snapshot.realized_pnl_total : null;
 
   // Phase 18.2-w — render the upgrade banner across every v2 page. Banner
   // self-hides when there is no pending upgrade. Dismiss persists in
@@ -85,45 +82,7 @@ export function Shell({ pageLabel, topbarAux, topbarActions, children }: ShellPr
         <NavItem to="/v2/risk" label="Risk caps" icon={IconShield} />
         <NavItem to="/v2/settings" label="Settings" icon={IconCog} />
 
-        <div style={{ marginTop: "auto" }}>
-          {/* Phase 18.2-w (H P3a) — paper→live promote CTA. Sits at the
-              bottom of the rail above the user card, amber-outlined so it
-              reads as a deliberate next step, not chrome. Hidden once the
-              user is already in live mode. */}
-          {executionMode === "paper" && (
-            <NavLink
-              to="/v2/risk"
-              style={{
-                margin: "var(--susu-s-3)",
-                padding: "10px 14px",
-                borderRadius: 999,
-                border: "1px solid #f6c177",
-                background: "rgba(246, 193, 119, 0.08)",
-                color: "#f6c177",
-                fontFamily: "var(--susu-mono)",
-                fontSize: 11,
-                letterSpacing: "0.04em",
-                textAlign: "center",
-                textDecoration: "none",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: "var(--susu-s-2)",
-              }}
-            >
-              <span>
-                <strong style={{ fontWeight: 600 }}>PAPER</strong>
-                {bookBalance != null && (
-                  <span style={{ marginLeft: 6, opacity: 0.75 }}>
-                    · {formatMoney(bookBalance)}
-                  </span>
-                )}
-              </span>
-              <span>go live →</span>
-            </NavLink>
-          )}
-
-          <div style={{ padding: "var(--susu-s-4) var(--susu-s-3)", borderTop: "1px solid var(--susu-hairline)" }}>
+        <div style={{ marginTop: "auto", padding: "var(--susu-s-4) var(--susu-s-3)", borderTop: "1px solid var(--susu-hairline)" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "var(--susu-s-3)" }}>
             <div
               className="susu-avatar round"
@@ -154,7 +113,6 @@ export function Shell({ pageLabel, topbarAux, topbarActions, children }: ShellPr
                 {me?.address ? `${me.address.slice(0, 4)}…${me.address.slice(-4)}` : "—"}
               </div>
             </div>
-          </div>
           </div>
         </div>
       </aside>

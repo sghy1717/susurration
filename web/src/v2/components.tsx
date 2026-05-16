@@ -462,18 +462,34 @@ export function PriceSlider({
           </>
         )}
       </svg>
+      {/* Phase 18.2-w UX fix — mark label tracks the dot's actual axis
+          position via absolute placement (not flex-center), so when the
+          dot is near SL the "mark X" text sits near the SL label, not
+          floating in the middle. SL / TP labels stay anchored to the
+          slider endpoints. */}
       <div style={{
-        display: "flex",
-        justifyContent: "space-between",
+        position: "relative",
+        height: 12,
         fontFamily: "var(--susu-mono)",
         fontSize: 9,
         color: "var(--susu-ink-subtle)",
-        lineHeight: 1,
         fontVariantNumeric: "tabular-nums",
       }}>
-        <span>sl {fmt(sl)}</span>
-        <span style={{ color: markColor }}>{mark != null ? `mark ${fmt(mark)}` : "—"}</span>
-        <span>tp {fmt(tp)}</span>
+        <span style={{ position: "absolute", left: padX, transform: "translateX(-50%)" }}>sl {fmt(sl)}</span>
+        <span style={{ position: "absolute", right: padX, transform: "translateX(50%)" }}>tp {fmt(tp)}</span>
+        {markPct != null && (
+          <span
+            style={{
+              position: "absolute",
+              left: xAt(markPct),
+              transform: "translateX(-50%)",
+              color: markColor,
+              whiteSpace: "nowrap",
+            }}
+          >
+            mark {fmt(mark!)}
+          </span>
+        )}
       </div>
     </div>
   );

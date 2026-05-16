@@ -78,5 +78,12 @@ export const session = {
     localStorage.removeItem(ADDRESS_KEY);
     localStorage.removeItem(LEGACY_TOKEN_KEY);
     localStorage.removeItem(LEGACY_ADDRESS_KEY);
+    // Drop the v2 SWR cache so re-signing in (or a different account)
+    // doesn't briefly render someone else's data.
+    try {
+      // Lazy import to avoid circular dependency at module-load time.
+      const mod = (window as any).__susuClearPollCache;
+      if (typeof mod === "function") mod();
+    } catch { /* never fatal */ }
   },
 };
