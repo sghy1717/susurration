@@ -422,6 +422,11 @@ export function PriceSlider({
     maximumFractionDigits: v >= 100 ? 2 : v >= 1 ? 3 : 5,
   });
 
+  // Phase 18.2-w UX fix — earlier "all three labels on one line below the
+  // bar" approach made the mark label collide with sl/tp whenever the dot
+  // sat near an endpoint. Splitting onto two rows: mark label rides above
+  // the dot (follows x position), sl + tp anchor to the bar endpoints
+  // beneath. Clean separation, no possible overlap.
   return (
     <div
       title={`SL ${fmt(sl)} · mark ${mark != null ? fmt(mark) : "—"} · TP ${fmt(tp)}`}
@@ -429,10 +434,31 @@ export function PriceSlider({
         display: "inline-flex",
         flexDirection: "column",
         alignItems: "stretch",
-        gap: 2,
         minWidth: W,
+        fontFamily: "var(--susu-mono)",
+        fontSize: 9,
+        color: "var(--susu-ink-subtle)",
+        fontVariantNumeric: "tabular-nums",
+        lineHeight: 1.1,
       }}
     >
+      {/* Top row — mark label, tracks dot x. Reserved height even when no
+          mark so the bar stays at the same y across rows. */}
+      <div style={{ position: "relative", height: 12, marginBottom: 2 }}>
+        {markPct != null && (
+          <span
+            style={{
+              position: "absolute",
+              left: xAt(Math.max(0, Math.min(1, markPct))),
+              transform: "translateX(-50%)",
+              color: markColor,
+              whiteSpace: "nowrap",
+            }}
+          >
+            mark {fmt(mark!)}
+          </span>
+        )}
+      </div>
       <svg viewBox={`0 0 ${W} ${H}`} style={{ width: W, height: H, display: "block" }}>
         {/* base track */}
         <line x1={padX} x2={W - padX} y1={H / 2} y2={H / 2}
@@ -462,34 +488,14 @@ export function PriceSlider({
           </>
         )}
       </svg>
-      {/* Phase 18.2-w UX fix — mark label tracks the dot's actual axis
-          position via absolute placement (not flex-center), so when the
-          dot is near SL the "mark X" text sits near the SL label, not
-          floating in the middle. SL / TP labels stay anchored to the
-          slider endpoints. */}
+      {/* Bottom row — sl on the left endpoint, tp on the right endpoint.
+          flex space-between keeps them locked to the bar's edges. */}
       <div style={{
-        position: "relative",
-        height: 12,
-        fontFamily: "var(--susu-mono)",
-        fontSize: 9,
-        color: "var(--susu-ink-subtle)",
-        fontVariantNumeric: "tabular-nums",
+        display: "flex", justifyContent: "space-between",
+        marginTop: 2,
       }}>
-        <span style={{ position: "absolute", left: padX, transform: "translateX(-50%)" }}>sl {fmt(sl)}</span>
-        <span style={{ position: "absolute", right: padX, transform: "translateX(50%)" }}>tp {fmt(tp)}</span>
-        {markPct != null && (
-          <span
-            style={{
-              position: "absolute",
-              left: xAt(markPct),
-              transform: "translateX(-50%)",
-              color: markColor,
-              whiteSpace: "nowrap",
-            }}
-          >
-            mark {fmt(mark!)}
-          </span>
-        )}
+        <span>sl {fmt(sl)}</span>
+        <span>tp {fmt(tp)}</span>
       </div>
     </div>
   );
