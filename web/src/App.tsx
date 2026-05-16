@@ -22,23 +22,11 @@ import { DashboardPage } from "./DashboardPage.tsx";
 import { OverviewPage } from "./v2/OverviewPage.tsx";
 import { FeedPage } from "./v2/FeedPage.tsx";
 import { FriendsPage } from "./v2/FriendsPage.tsx";
-import { Shell } from "./v2/Shell.tsx";
+import { BookPage } from "./v2/BookPage.tsx";
+import { DaemonPage } from "./v2/DaemonPage.tsx";
+import { RiskPage } from "./v2/RiskPage.tsx";
+import { SettingsPage } from "./v2/SettingsPage.tsx";
 import "./v2/tokens.css";
-
-function Placeholder({ label }: { label: string }) {
-  return (
-    <Shell pageLabel={label}>
-      <div style={{ padding: "var(--susu-s-8)", textAlign: "center", color: "var(--susu-ink-subtle)" }}>
-        <div className="susu-eyebrow" style={{ marginBottom: "var(--susu-s-3)" }}>{label}</div>
-        <h2 className="susu-h2">Coming in v2.1</h2>
-        <p className="susu-body" style={{ marginTop: "var(--susu-s-3)", maxWidth: "48ch", marginLeft: "auto", marginRight: "auto" }}>
-          This surface is intentionally empty in the v2 first ship. Decide what
-          belongs here by watching how peers' agents actually use the network.
-        </p>
-      </div>
-    </Shell>
-  );
-}
 
 export function App() {
   return (
@@ -47,17 +35,22 @@ export function App() {
         <Routes>
           <Route path="/" element={<LandingPage />} />
           <Route path="/docs" element={<DocsPage />} />
-          <Route path="/dashboard" element={<DashboardPage />} />
 
-          {/* v2 redesigned dashboard */}
+          {/* Phase 18.2-w — v2 dashboard is the default. /dashboard redirects
+              into v2 so existing bookmarks + landing-page CTA work without
+              edit. /v0/dashboard kept as escape hatch for users who hit
+              regressions during the rollout — drop it once v2 is stable. */}
+          <Route path="/dashboard" element={<Navigate to="/v2/overview" replace />} />
+          <Route path="/v0/dashboard" element={<DashboardPage />} />
+
           <Route path="/v2" element={<Navigate to="/v2/overview" replace />} />
           <Route path="/v2/overview" element={<OverviewPage />} />
           <Route path="/v2/feed" element={<FeedPage />} />
           <Route path="/v2/friends" element={<FriendsPage />} />
-          <Route path="/v2/book" element={<Placeholder label="book" />} />
-          <Route path="/v2/daemon" element={<Placeholder label="daemon" />} />
-          <Route path="/v2/risk" element={<Placeholder label="risk caps" />} />
-          <Route path="/v2/settings" element={<Placeholder label="settings" />} />
+          <Route path="/v2/book" element={<BookPage />} />
+          <Route path="/v2/daemon" element={<DaemonPage />} />
+          <Route path="/v2/risk" element={<RiskPage />} />
+          <Route path="/v2/settings" element={<SettingsPage />} />
 
           <Route path="*" element={<LandingPage />} />
         </Routes>
