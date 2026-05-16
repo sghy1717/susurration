@@ -132,7 +132,7 @@ export function Shell({ pageLabel, topbarAux, topbarActions, children }: ShellPr
             <IconBurger />
           </button>
           <div className="susu-topbar-crumb">
-            <Wordmark size="sm" /> &nbsp;<strong>{t(pageLabel)}</strong>
+            <strong>{t(pageLabel)}</strong>
           </div>
           <div style={{ flex: 1 }} />
           {topbarAux != null && (
@@ -233,10 +233,11 @@ const IconShield = () => (
     <path d="M5 7l1.5 1.5L9 6" />
   </svg>
 );
+// Proper gear: 8 teeth + center hole, recognizably ⚙ at 16px.
 const IconCog = () => (
-  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ width: 16, height: 16 }}>
-    <circle cx="8" cy="8" r="2" />
-    <path d="M8 1.5v2M8 12.5v2M2.5 6.5L1 7l1 2 1.5-.5M13 4.5l1-1.5L12 2l-.5 1.5" />
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" style={{ width: 16, height: 16 }}>
+    <circle cx="8" cy="8" r="2.2" />
+    <path d="M8 0.8v2.4M8 12.8v2.4M0.8 8h2.4M12.8 8h2.4M2.9 2.9l1.7 1.7M11.4 11.4l1.7 1.7M2.9 13.1l1.7-1.7M11.4 4.6l1.7-1.7" />
   </svg>
 );
 const IconBurger = () => (
