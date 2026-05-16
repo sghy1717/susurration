@@ -1075,37 +1075,29 @@ function UpgradeBanner() {
     return () => { cancelled = true; };
   }, [auth.token]);
 
-  // Phase 17 — probe local daemon HTTP server to decide one-click vs copy-command path.
-  // Only probes when we know there's actually an upgrade to do (avoids needless localhost
-  // calls on every dashboard load).
+  // Phase 18.2-w — lazy probe. We used to eager-probe the daemon localhost
+  // /healthz as soon as needsUpgrade flipped true. That triggered a mixed-
+  // content / CORS permission prompt in some browsers (HTTPS page reaching
+  // http://127.0.0.1), even when the user never opened the banner and the
+  // button label was the unrelated "Copy upgrade cmd" path. The two
+  // surfaces were giving contradictory signals: button = copy intent,
+  // browser = "site is asking for localhost permission, allow?". Confusing.
+  //
+  // Fix: don't probe at all on mount. Single click triggers the probe;
+  // result decides one-click vs clipboard copy inline.
   const needsUpgrade =
     currentVersion != null &&
     latestVersion != null &&
     semverLT(currentVersion, latestVersion);
-  useEffect(() => {
-    if (!needsUpgrade || oneClickReady !== null) return;
-    let cancelled = false;
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 1500);
-    fetch(`${DAEMON_LOCAL_BASE}/healthz`, { signal: ctrl.signal })
-      .then(r => r.ok ? r.json() : null)
-      .then((data: any) => {
-        clearTimeout(t);
-        if (cancelled) return;
-        // Daemon must report an /upgrade endpoint for one-click to work.
-        setOneClickReady(!!data && typeof data.upgrade_endpoint === "string");
-      })
-      .catch(() => { clearTimeout(t); if (!cancelled) setOneClickReady(false); });
-    return () => { cancelled = true; ctrl.abort(); };
-  }, [needsUpgrade, oneClickReady]);
 
   const showBanner = !dismissed && needsUpgrade;
   if (!showBanner) return null;
 
   const installerCmd = ` npx -y @susurration/installer install --token ${auth.token ?? "sk_live_YOUR_TOKEN"}`;
 
-  // Copy-command path (MVP fallback). Used when daemon is on another machine,
-  // not running, or running an older version without /healthz.
+  // Copy-command fallback. Used when daemon localhost probe fails or one-
+  // click upgrade can't proceed (different machine, daemon stopped, older
+  // daemon without /healthz, etc).
   const handleCopyClick = () => {
     navigator.clipboard.writeText(installerCmd).then(
       () => { setCopied(true); setTimeout(() => setCopied(false), 3000); },
@@ -1120,6 +1112,33 @@ function UpgradeBanner() {
       }),
       keepalive: true,
     }).catch(() => {});
+  };
+
+  // Phase 18.2-w — single click handler. Probes localhost daemon ON DEMAND,
+  // then either runs one-click upgrade or falls back to copying the command.
+  // No localhost requests happen until this fires, so passive page loads
+  // never surface a mixed-content permission prompt.
+  const handleUpgradeClick = async () => {
+    // Lazy probe: try /healthz once (1.5s timeout). Network error / CORS /
+    // daemon-not-running all map to "not reachable; copy instead".
+    let ready = false;
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 1500);
+      const r = await fetch(`${DAEMON_LOCAL_BASE}/healthz`, { signal: ctrl.signal });
+      clearTimeout(t);
+      if (r.ok) {
+        const data: any = await r.json().catch(() => null);
+        ready = !!data && typeof data.upgrade_endpoint === "string";
+      }
+    } catch { /* unreachable */ }
+
+    setOneClickReady(ready);
+    if (ready) {
+      await handleOneClickUpgrade();
+    } else {
+      handleCopyClick();
+    }
   };
 
   // One-click path. POSTs to local daemon, then polls /healthz until version updates.
@@ -1236,27 +1255,24 @@ function UpgradeBanner() {
       : "Daemon did not start within 60s after upgrade — restart manually");
   };
 
-  // After a one-click failure, future clicks fall through to copy-command path.
-  const effectiveOneClick = oneClickReady && upgradeState !== "error";
-  const handleClick = effectiveOneClick ? handleOneClickUpgrade : handleCopyClick;
+  // Phase 18.2-w — single click handler that decides one-click vs copy
+  // after probing daemon on demand. The label is one of: neutral
+  // "Upgrade" before user interacts, or a state-specific string after.
+  const handleClick = handleUpgradeClick;
 
   let buttonLabel: string;
   if (upgradeState === "upgrading") {
-    buttonLabel = lang === "zh" ? "升级中..." : "Upgrading...";
+    buttonLabel = lang === "zh" ? "升级中…" : "Upgrading…";
   } else if (upgradeState === "polling") {
-    buttonLabel = lang === "zh" ? "等待重启..." : "Restarting...";
+    buttonLabel = lang === "zh" ? "重启 daemon 中…" : "Restarting daemon…";
   } else if (upgradeState === "done") {
     buttonLabel = lang === "zh" ? "✓ 已升级" : "✓ Upgraded";
+  } else if (copied) {
+    buttonLabel = lang === "zh" ? "✓ 已复制 — 粘贴到终端" : "✓ Copied — paste in terminal";
   } else if (upgradeState === "error") {
-    buttonLabel = copied
-      ? (lang === "zh" ? "✓ 已复制" : "✓ Copied")
-      : (lang === "zh" ? "复制升级命令" : "Copy upgrade cmd");
-  } else if (effectiveOneClick) {
-    buttonLabel = lang === "zh" ? "一键升级" : "Upgrade now";
+    buttonLabel = lang === "zh" ? "重试" : "Try again";
   } else {
-    buttonLabel = copied
-      ? (lang === "zh" ? "✓ 已复制" : "✓ Copied")
-      : (lang === "zh" ? "复制升级命令" : "Copy upgrade cmd");
+    buttonLabel = lang === "zh" ? "升级" : "Upgrade";
   }
   const busy = upgradeState === "upgrading" || upgradeState === "polling";
   const buttonGreen = copied || upgradeState === "done";

@@ -253,23 +253,22 @@ export function UpgradeBanner({
 }) {
   if (!status.needsUpgrade) return null;
 
-  const { state, error, copied, oneClickReady, currentVersion, latestVersion,
-    triggerOneClick, triggerCopyCommand } = status;
+  const { state, error, currentVersion, latestVersion, triggerUpgrade } = status;
 
-  // After a one-click failure, fall through to copy-command for retries.
-  const effectiveOneClick = oneClickReady && state !== "error";
-  const handleClick = effectiveOneClick ? triggerOneClick : triggerCopyCommand;
-
+  // One button, one trigger. Lazy probe means the label can stay neutral
+  // ("Upgrade") on idle — we only know whether this turns into a real
+  // one-click or a clipboard copy after the user opts in. State labels
+  // narrate after that decision.
   let buttonLabel: string;
-  if (state === "upgrading")       buttonLabel = "Upgrading…";
-  else if (state === "polling")    buttonLabel = "Restarting daemon…";
-  else if (state === "done")       buttonLabel = "✓ Upgraded";
-  else if (state === "error")      buttonLabel = copied ? "✓ Copied" : "Copy upgrade cmd";
-  else if (effectiveOneClick)      buttonLabel = "Upgrade now";
-  else                             buttonLabel = copied ? "✓ Copied" : "Copy upgrade cmd";
+  if (state === "upgrading")    buttonLabel = "Upgrading…";
+  else if (state === "polling") buttonLabel = "Restarting daemon…";
+  else if (state === "done")    buttonLabel = "✓ Upgraded";
+  else if (state === "copied")  buttonLabel = "✓ Copied — paste in terminal";
+  else if (state === "error")   buttonLabel = "Try again";
+  else                          buttonLabel = "Upgrade";
 
   const busy = state === "upgrading" || state === "polling";
-  const successTone = copied || state === "done";
+  const successTone = state === "done" || state === "copied";
 
   return (
     <div
@@ -314,7 +313,7 @@ export function UpgradeBanner({
       </span>
 
       <button
-        onClick={() => { if (!busy && state !== "done") handleClick(); }}
+        onClick={() => { if (!busy && state !== "done") void triggerUpgrade(); }}
         disabled={busy || state === "done"}
         style={{
           border: "none",
@@ -329,10 +328,7 @@ export function UpgradeBanner({
           opacity: busy ? 0.7 : 1,
           transition: "background-color 160ms ease, color 160ms ease, opacity 160ms ease",
         }}
-        title={effectiveOneClick
-          ? "Trigger your local daemon's /upgrade endpoint and wait for it to come back online."
-          : "Copy the installer command — paste in your terminal to upgrade manually."
-        }
+        title="Click to upgrade. If your daemon is on this machine and reachable, it will self-upgrade; otherwise the installer command is copied to your clipboard."
       >
         {buttonLabel}
       </button>

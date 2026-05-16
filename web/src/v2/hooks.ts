@@ -252,31 +252,27 @@ export function usePeersStats(days: number = 30) {
 
 // ── daemon upgrade hook ──────────────────────────────────────────────────
 //
-// Phase 18.2-w — port of the v0 dashboard's UpgradeBanner state machine into
-// a v2-friendly hook. The flow:
-//   1. fetch our identity (`last_daemon_version`) + npm latest version
-//   2. if our daemon is behind, probe `127.0.0.1:7777/healthz` to see if
-//      one-click is available (= daemon is on this machine AND new enough to
-//      expose /upgrade)
-//   3. expose triggerOneClick + triggerCopy actions; the UI picks which
-//
-// The state machine deliberately mirrors v0 so the same edge cases (daemon
-// claims already_latest but server records older, polling timeout, etc.)
-// behave consistently. If we ever decommission the v0 dashboard, this hook
-// is the single place to keep iterating.
+// Phase 18.2-w (lazy-probe rewrite) — port of the v0 dashboard's
+// UpgradeBanner state machine, but the daemon localhost probe now ONLY
+// happens after the user clicks the upgrade button. Why: a HTTPS dashboard
+// page fetching http://127.0.0.1:7777 triggers a mixed-content / CORS
+// permission prompt in some browsers, which felt jarring when the banner
+// label was already "Copy upgrade cmd" (the user didn't ask for one-click,
+// so why is the browser asking for permission?). Single click does the
+// right thing: try daemon → success: kick /upgrade. fail: copy cmd to
+// clipboard + tell the user to paste it.
 
-export type UpgradeState = "idle" | "upgrading" | "polling" | "done" | "error";
+export type UpgradeState = "idle" | "upgrading" | "polling" | "done" | "copied" | "error";
 
 export interface UpgradeStatus {
   currentVersion: string | null;
   latestVersion: string | null;
   needsUpgrade: boolean;
-  oneClickReady: boolean | null;  // null = still probing
   state: UpgradeState;
   error: string | null;
-  copied: boolean;
-  triggerOneClick: () => Promise<void>;
-  triggerCopyCommand: () => Promise<void>;
+  /** Single user-facing trigger. Probes daemon lazily; falls back to
+   *  clipboard copy if daemon isn't reachable. */
+  triggerUpgrade: () => Promise<void>;
   installerCmd: string;
 }
 
@@ -296,12 +292,12 @@ function semverLT(a: string, b: string): boolean {
 export function useDaemonUpgrade(): UpgradeStatus {
   const [currentVersion, setCurrentVersion] = useState<string | null>(null);
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
-  const [oneClickReady, setOneClickReady] = useState<boolean | null>(null);
   const [state, setState] = useState<UpgradeState>("idle");
   const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
 
-  // 1. Fetch our daemon version + npm latest in parallel.
+  // 1. Fetch our daemon version + npm latest in parallel. These are normal
+  //    HTTPS API calls to the backend, no mixed-content concerns. Localhost
+  //    probe happens later, only after the user clicks (see triggerUpgrade).
   useEffect(() => {
     let cancelled = false;
     Promise.all([
@@ -320,43 +316,67 @@ export function useDaemonUpgrade(): UpgradeStatus {
     latestVersion != null &&
     semverLT(currentVersion, latestVersion);
 
-  // 2. Probe local daemon /healthz once we know an upgrade is pending. Two
-  //    aborts protect against the localhost call hanging: AbortController +
-  //    a 1.5s setTimeout fallback.
-  useEffect(() => {
-    if (!needsUpgrade || oneClickReady !== null) return;
-    let cancelled = false;
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 1500);
-    fetch(`${DAEMON_LOCAL_BASE}/healthz`, { signal: ctrl.signal })
-      .then((r) => r.ok ? r.json() : null)
-      .then((data: any) => {
-        clearTimeout(t);
-        if (cancelled) return;
-        setOneClickReady(!!data && typeof data.upgrade_endpoint === "string");
-      })
-      .catch(() => { clearTimeout(t); if (!cancelled) setOneClickReady(false); });
-    return () => { cancelled = true; ctrl.abort(); };
-  }, [needsUpgrade, oneClickReady]);
-
   const installerCmd = ` npx -y @susurration/installer install --token ${session.token ?? "sk_live_YOUR_TOKEN"}`;
 
-  const triggerCopyCommand = useCallback(async () => {
+  /** Copy the installer command to the clipboard. Used as fallback when
+   *  the daemon localhost probe fails (daemon on a different machine /
+   *  not running / pre-Phase-17 with no /healthz). */
+  const copyToClipboard = useCallback(async () => {
     try {
       await navigator.clipboard.writeText(installerCmd);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 3000);
-    } catch { /* clipboard denied; user can select text manually */ }
-    // Best-effort telemetry; ignore failure.
+      setState("copied");
+      // Auto-reset after 3s so a follow-up click can try again.
+      setTimeout(() => {
+        setState((s) => (s === "copied" ? "idle" : s));
+      }, 3000);
+    } catch {
+      // Clipboard API blocked (rare — usually permission required only on
+      // first interaction). Surface a hint so the user knows to select the
+      // command manually.
+      setState("error");
+      setError("Clipboard blocked — select the command in your terminal manually.");
+    }
+  }, [installerCmd]);
+
+  const triggerUpgrade = useCallback(async () => {
+    setError(null);
+
     api({ path: "/onboarding/event", method: "POST", body: {
       action: "upgrade_banner_click",
-      context: { current: currentVersion, latest: latestVersion, path: "copy" },
+      context: { current: currentVersion, latest: latestVersion, path: "click_pending_probe" },
     } }).catch(() => {});
-  }, [installerCmd, currentVersion, latestVersion]);
 
-  const triggerOneClick = useCallback(async () => {
+    // Lazy probe — only NOW do we touch localhost. If the daemon isn't
+    // reachable on this machine, fall back to clipboard copy without ever
+    // exposing the mixed-content request shape to passive page loads.
+    let oneClickReady = false;
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 1500);
+      const r = await fetch(`${DAEMON_LOCAL_BASE}/healthz`, { signal: ctrl.signal });
+      clearTimeout(t);
+      if (r.ok) {
+        const data = await r.json().catch(() => null) as any;
+        oneClickReady = !!data && typeof data.upgrade_endpoint === "string";
+      }
+    } catch {
+      // Network error / mixed-content denial / daemon not running.
+      // All map to: "this user doesn't have a local upgradeable daemon
+      // here, so we should copy the command instead."
+    }
+
+    if (!oneClickReady) {
+      await copyToClipboard();
+      // Telemetry: copy path.
+      api({ path: "/onboarding/event", method: "POST", body: {
+        action: "upgrade_banner_click",
+        context: { current: currentVersion, latest: latestVersion, path: "copy" },
+      } }).catch(() => {});
+      return;
+    }
+
+    // One-click path. Same state machine as v0.
     setState("upgrading");
-    setError(null);
     api({ path: "/onboarding/event", method: "POST", body: {
       action: "upgrade_banner_click",
       context: { current: currentVersion, latest: latestVersion, path: "one_click" },
@@ -446,18 +466,15 @@ export function useDaemonUpgrade(): UpgradeStatus {
     }
     setState("error");
     setError("Daemon did not start within 60s after upgrade — restart manually");
-  }, [currentVersion, latestVersion]);
+  }, [currentVersion, latestVersion, copyToClipboard]);
 
   return {
     currentVersion,
     latestVersion,
     needsUpgrade,
-    oneClickReady,
     state,
     error,
-    copied,
-    triggerOneClick,
-    triggerCopyCommand,
+    triggerUpgrade,
     installerCmd,
   };
 }
