@@ -277,7 +277,9 @@ function EquityNarrative({ snapshot }: { snapshot: any }) {
       marginTop: "var(--susu-s-3)",
       fontFamily: "var(--susu-mono)", fontSize: 12, lineHeight: 1.6,
       color: "var(--susu-ink-subtle)",
-      maxWidth: "60ch",
+      // No maxWidth — the equity curve panel above already constrains
+      // horizontal extent. Limiting to 60ch forced an unnecessary wrap
+      // on standard desktop widths.
     }}>
       <strong style={{ color: "var(--susu-ink)", fontWeight: 500 }}>
         {t("v2.ov.narrative.winRate", { pct: winRate })}

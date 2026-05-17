@@ -131,9 +131,10 @@ export function Shell({ pageLabel, topbarAux, topbarActions, children }: ShellPr
           >
             <IconBurger />
           </button>
-          <div className="susu-topbar-crumb">
-            <strong>{t(pageLabel)}</strong>
-          </div>
+          {/* Page label removed — the left rail's active nav item already
+              tells the user which page they're on, and showing the name
+              again in the topbar crumb was redundant noise. */}
+          <div className="susu-topbar-crumb" />
           <div style={{ flex: 1 }} />
           {topbarAux != null && (
             <div style={{
