@@ -435,20 +435,28 @@ function PeerDetailPanel({ address, channels }: { address: string; channels: Cha
 // like the rest of v2.
 function ChannelDetailPanel({ channelId }: { channelId: string }) {
   const { t } = useLang();
-  const { data: detail, loading: detailLoading } = useChannelDetail(channelId);
-  const { data: membersResp, loading: membersLoading } = useChannelMembers(channelId);
+  const { data: detail, loading: detailLoading, error: detailError } = useChannelDetail(channelId);
+  const { data: membersResp, loading: membersLoading, error: membersError } = useChannelMembers(channelId);
 
-  if ((detailLoading && !detail) || (membersLoading && !membersResp)) {
+  // Two independent fetches. Don't gate the whole panel on the slower of
+  // the two — show the channel shell as soon as `detail` is available,
+  // and let the members list render its own loading/error state inline.
+  // Avoids the previous failure mode where one slow request (or a stuck
+  // socket) left the entire panel in a "loading…" screen with no way
+  // for the user to tell whether anything was happening.
+  if (detailLoading && !detail) {
     return (
       <div className="susu-panel" style={{ padding: "var(--susu-s-8)", color: "var(--susu-ink-subtle)" }}>
-        {t("v2.friends.detail.loading")}
+        {t("v2.friends.channel.loading")}
       </div>
     );
   }
   if (!detail) {
     return (
       <div className="susu-panel" style={{ padding: "var(--susu-s-8)", color: "var(--susu-ink-subtle)" }}>
-        {t("v2.friends.channel.notFound")}
+        {detailError
+          ? t("v2.friends.channel.fetchFailed", { code: String(detailError.status || "?") })
+          : t("v2.friends.channel.notFound")}
       </div>
     );
   }
@@ -484,7 +492,13 @@ function ChannelDetailPanel({ channelId }: { channelId: string }) {
           </div>
         </div>
         <div style={{ border: "1px solid var(--susu-hairline)", borderRadius: "var(--susu-r-md)", overflow: "hidden" }}>
-          {members.length === 0 ? (
+          {membersLoading && !membersResp ? (
+            <div className="susu-empty">{t("v2.friends.channel.membersLoading")}</div>
+          ) : membersError && !membersResp ? (
+            <div className="susu-empty" style={{ color: "var(--susu-neg)" }}>
+              {t("v2.friends.channel.membersFailed", { code: String(membersError.status || "?") })}
+            </div>
+          ) : members.length === 0 ? (
             <div className="susu-empty">{t("v2.friends.channel.empty")}</div>
           ) : members.map(m => {
             const handle = m.username ? `@${m.username}` : `${m.address.slice(0, 6)}…`;

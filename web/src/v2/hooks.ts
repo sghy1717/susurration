@@ -345,7 +345,24 @@ function usePoll<T>(
       });
     }
     try {
-      const res = await pending;
+      // Client-side timeout sleeve. Without it a stalled connection
+      // (mid-stream RST, proxy black-hole, browser conn-pool starvation
+      // under SSE + parallel polls, etc.) leaves the await pending
+      // forever, which leaves the consumer's loading state pinned at
+      // true with no error to act on. 15s is well past the p99 of the
+      // endpoints we call here (peers/stats was the previous slowest
+      // at ~24s before MAX_DAYS got capped to 120; everything else is
+      // sub-second). If a real request needs more, the next interval
+      // tick will retry.
+      const res = await Promise.race<T>([
+        pending as Promise<T>,
+        new Promise<T>((_, reject) =>
+          setTimeout(
+            () => reject(new ApiError(0, "client_timeout", path)),
+            15_000,
+          ),
+        ),
+      ]);
       pollCache.set(path, { data: res, ts: Date.now() });
       // Mirror to localStorage so the next cold reload can paint this
       // value before the network round-trip completes.
