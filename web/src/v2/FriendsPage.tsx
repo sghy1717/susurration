@@ -2,7 +2,7 @@
 // Only human-triggered writes are allowed here (add friend / accept request).
 // All other state is read-only per the agent-native framing.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Shell } from "./Shell";
 import {
   useFriends, usePendingRequests, useChannelGroups, usePeerDetail,
@@ -30,10 +30,14 @@ export function FriendsPage() {
   const pending = pendingResp?.requests ?? [];
   const channels = channelsResp?.groups ?? [];
 
-  // Default selection: first friend when list arrives and nothing selected.
-  if (selectedAddress == null && friends.length > 0) {
-    setTimeout(() => setSelectedAddress(friends[0]!.friend_address), 0);
-  }
+  // Default selection: first friend once the list arrives. useEffect (not an
+  // inline setTimeout during render) so React 18 strict mode doesn't warn and
+  // the scheduler can batch the update with the rest of the commit phase.
+  useEffect(() => {
+    if (selectedAddress == null && friends.length > 0) {
+      setSelectedAddress(friends[0]!.friend_address);
+    }
+  }, [friends, selectedAddress]);
 
   return (
     <Shell
