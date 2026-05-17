@@ -357,10 +357,16 @@ function usePoll<T>(
       const res = await Promise.race<T>([
         pending as Promise<T>,
         new Promise<T>((_, reject) =>
-          setTimeout(
-            () => reject(new ApiError(0, "client_timeout", path)),
-            15_000,
-          ),
+          setTimeout(() => {
+            // Critical: evict the stuck promise from `inflight` BEFORE
+            // rejecting. Otherwise on every subsequent setInterval tick
+            // fetchOnce sees inflight.get(path) hit, re-awaits the same
+            // dead promise, races the same timeout, and the view stays
+            // empty forever. With this evict, the next tick spawns a
+            // fresh fetch attempt with a clean Promise.
+            if (inflight.get(path) === pending) inflight.delete(path);
+            reject(new ApiError(0, "client_timeout", path));
+          }, 15_000),
         ),
       ]);
       pollCache.set(path, { data: res, ts: Date.now() });
