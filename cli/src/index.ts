@@ -13,15 +13,14 @@ import { generateWallet, importWallet, signMessage } from "./wallet.ts";
 import { printBanner } from "./banner.ts";
 // Single source of truth — see code/shared/agent-doc.ts. Bun bundles this in
 // at `bun build` time, so the published bin/susu.mjs has it inlined.
-import { AGENT_DOC, REFERENCE_SYSTEM_PROMPT } from "../../shared/agent-doc.ts";
+import { AGENT_DOC } from "../../shared/agent-doc.ts";
 import { stripControlCharsDeep, stripControlChars } from "../../shared/strip-control.ts";
 
 const HELP = `susu — Susurration CLI (alias of \`susurration\`)
 
 Quick Start
-  susu join                                   Interactive setup (recommended for new users)
-  susu join @handle --llm-key KEY            Non-interactive setup (for agents / scripts)
-                                  --no-paper  Skip built-in paper trading (you have your own)
+  npx -y @susurration/installer install       One-shot setup (wallet + handle + IDE + daemon)
+  susu join                                   Deprecated — prints the installer command above
 
 Account
   susu init [--import SECRET]                Create or import your account
@@ -234,233 +233,52 @@ function promptLine(question: string): Promise<string> {
   });
 }
 
+// Phase 18 deprecation: `susu join` used to bootstrap an LLM-SDK-based daemon
+// (anthropic/openai keys). Daemon ≥ 0.0.21 is an IDE-runner spawner that
+// FATALs without `agent_runner` in agent-config.json. Rather than fork the
+// installer's IDE-detection / MCP-wiring logic into this CLI package, route
+// every user through the installer (single source of truth). The CLI keeps
+// register / login / wallet management; daemon bring-up moves out.
 async function cmdJoin(args: string[]): Promise<number> {
-  const FORMAT_RE = /^[a-z0-9][a-z0-9_-]{4,19}$/;
-  let raw = args[0];
-  let llmKey = pickFlag(args, "--llm-key");
-  let noPaper = args.includes("--no-paper");
+  const tokenFlag = pickFlag(args, "--token");
+  const onlyFlag = pickFlag(args, "--only");
+  const llmKeyFlag = pickFlag(args, "--llm-key");
+  const handleArg = args.find(a => !a.startsWith("-"));
 
-  let alreadyRegistered = false;
-
-  // Interactive mode: no args → guide user step by step
-  if (!raw) {
-    process.stderr.write(
-      "\n  Welcome to Susurration\n" +
-      "  Your agent joins a trusted circle that trades signals 24/7.\n\n",
-    );
-
-    // Check if already registered
-    const existingCfg = await loadConfig();
-    if (existingCfg.handle) {
-      process.stderr.write(`  Already registered as @${existingCfg.handle}\n\n`);
-      raw = "@" + existingCfg.handle;
-      alreadyRegistered = true;
-    } else {
-      const input = await promptLine("  Pick a handle (permanent, 5-20 chars, a-z 0-9 _ -): @");
-      if (!input) { process.stderr.write("cancelled\n"); return 1; }
-      raw = "@" + input.replace(/^@/, "").toLowerCase();
-    }
-
-    if (!llmKey) {
-      const keyInput = await promptLine("  LLM API key (OpenAI or Anthropic): ");
-      if (!keyInput) { process.stderr.write("cancelled\n"); return 1; }
-      llmKey = keyInput;
-    }
-
-    if (!noPaper) {
-      const own = await promptLine("  Do you have your own paper trading / execution system? (y/N): ");
-      if (own && own.toLowerCase().startsWith("y")) noPaper = true;
-    }
-
-    process.stderr.write("\n");
-  }
-
-  const username = (raw.startsWith("@") ? raw.slice(1) : raw).toLowerCase();
-  if (!alreadyRegistered && !FORMAT_RE.test(username)) {
-    process.stderr.write(
-      `invalid handle "@${username}": must be 5-20 chars, lowercase a-z 0-9 _ -\n`,
-    );
-    return 1;
-  }
-
-  if (!llmKey) {
-    process.stderr.write("--llm-key is required (your OpenAI or Anthropic API key)\n");
-    return 1;
-  }
-
-  const cfg = await loadConfig();
-
-  // Step 1: init (generate keypair if not exists)
-  if (!cfg.address || !cfg.secret_key_b58) {
-    const keys = generateWallet();
-    cfg.address = keys.address;
-    cfg.secret_key_b58 = keys.secret_key_b58;
-    delete cfg.token;
-    delete cfg.token_expires_at;
-    await saveConfig(cfg);
-    process.stderr.write("✓ keypair created\n");
-  } else {
-    process.stderr.write("✓ keypair exists\n");
-  }
-
-  // Step 2: login (get session token)
-  if (!cfg.token || (cfg.token_expires_at && new Date(cfg.token_expires_at) < new Date())) {
-    const nonceResp = await api<{ nonce: string; message: string; expires_at: string }>(
-      cfg, "/auth/nonce", {
-        method: "POST", body: JSON.stringify({ address: cfg.address }), auth: false,
-      },
-    );
-    const sig_b58 = signMessage(cfg.secret_key_b58!, nonceResp.message);
-    const verify = await api<{ token: string; expires_at: string; address: string }>(
-      cfg, "/auth/verify", {
-        method: "POST",
-        body: JSON.stringify({ address: cfg.address, nonce: nonceResp.nonce, signature_b58: sig_b58 }),
-        auth: false,
-      },
-    );
-    cfg.token = verify.token;
-    cfg.token_expires_at = verify.expires_at;
-    await saveConfig(cfg);
-    process.stderr.write("✓ logged in\n");
-  } else {
-    process.stderr.write("✓ session active\n");
-  }
-
-  // Step 3: register handle
-  if (cfg.handle) {
-    process.stderr.write(`✓ already registered as @${cfg.handle}\n`);
-
-    // Fast path: already registered + daemon config exists + daemon running → nothing to do
-    const path0 = await import("node:path");
-    const fs0 = await import("node:fs/promises");
-    const pidPath0 = path0.join(configDir(), "agent-daemon.pid");
-    const configPath0 = path0.join(configDir(), "agent-config.json");
-    let daemonAlive = false;
-    try {
-      const pid = parseInt(await fs0.readFile(pidPath0, "utf8"), 10);
-      if (pid > 0) { process.kill(pid, 0); daemonAlive = true; }
-    } catch {}
-    const configExists = await fs0.access(configPath0).then(() => true, () => false);
-
-    if (daemonAlive && configExists) {
-      process.stdout.write(
-        `\n✓ @${cfg.handle} is already live on Susurration\n` +
-        `✓ Daemon already running\n` +
-        `\nNothing to do. To add friends: susu add @<friend>\n`,
-      );
-      return 0;
-    }
-  } else {
-    try {
-      const out = await api<{ address: string; username: string }>(cfg, "/identity/register", {
-        method: "POST", body: JSON.stringify({ username }),
-      });
-      cfg.handle = out.username;
-      await saveConfig(cfg);
-      process.stderr.write(`✓ registered as @${out.username} (permanent)\n`);
-    } catch (e: any) {
-      if (e?.status === 409 && e?.message?.includes("already_locked")) {
-        process.stderr.write(`✓ handle already locked\n`);
-      } else {
-        throw e;
-      }
-    }
-  }
-
-  // Step 4: detect LLM provider + generate daemon config
-  let provider = "openai";
-  let model = "gpt-4o";
-  if (llmKey.startsWith("sk-ant-")) {
-    provider = "anthropic";
-    model = "claude-sonnet-4-20250514";
-  }
-
-  const fs = await import("node:fs/promises");
-  const path = await import("node:path");
-
-  const daemonConfigPath = path.join(configDir(), "agent-config.json");
-  const daemonConfig = {
-    api_url: cfg.api_url,
-    token: cfg.token,
-    llm: { provider, api_key: llmKey, model },
-    agent: {
-      system_prompt: REFERENCE_SYSTEM_PROMPT,
-      max_calls_per_minute: 10,
-      history_per_channel: 20,
-    },
-    decision_log_path: path.join(configDir(), "agent-decisions.jsonl"),
-    state_path: path.join(configDir(), "agent-daemon.state.json"),
-    dry_run_pushes: true,
-    paper_trading: { enabled: !noPaper },
-  };
-  await fs.writeFile(daemonConfigPath, JSON.stringify(daemonConfig, null, 2));
-  await fs.chmod(daemonConfigPath, 0o600).catch(() => {});
-  const ptLabel = noPaper ? "paper trading off (using your own)" : "paper trading built-in";
-  process.stderr.write(`✓ daemon config written (${provider}/${model}, ${ptLabel})\n`);
-
-  // Step 5: kill old daemon (if any) + install + start new daemon
-  const { spawn, execSync } = await import("node:child_process");
-  const pidPath = path.join(configDir(), "agent-daemon.pid");
-
-  // Kill old daemon cleanly before starting a new one.
-  try {
-    const oldPid = parseInt(await fs.readFile(pidPath, "utf8"), 10);
-    if (oldPid > 0) {
-      try {
-        process.kill(oldPid, "SIGTERM");
-        await new Promise((r) => setTimeout(r, 1500));
-        try { process.kill(oldPid, 0); process.kill(oldPid, "SIGKILL"); } catch {}
-      } catch (e: any) {
-        if (e?.code !== "ESRCH") throw e; // ESRCH = already dead
-      }
-      process.stderr.write(`✓ stopped old daemon (PID ${oldPid})\n`);
-    }
-  } catch { /* no PID file or not readable */ }
-
-  let daemonBin: string | null = null;
-  try {
-    daemonBin = execSync("which susu-agent-daemon", { encoding: "utf8" }).trim();
-  } catch {
-    process.stderr.write("  installing susurration-agent-daemon...\n");
-    try {
-      execSync("npm install -g susurration-agent-daemon", { stdio: "pipe", timeout: 60_000 });
-      daemonBin = execSync("which susu-agent-daemon", { encoding: "utf8" }).trim();
-    } catch {
-      process.stderr.write(
-        "⚠ daemon install failed — install manually:\n" +
-        "  npm install -g susurration-agent-daemon\n" +
-        "  susu-agent-daemon --config " + daemonConfigPath + "\n",
-      );
-    }
-  }
-
-  if (daemonBin) {
-    const child = spawn(daemonBin, ["--config", daemonConfigPath], {
-      detached: true, stdio: "ignore",
-    });
-    child.unref();
-    await fs.writeFile(pidPath, String(child.pid ?? ""));
-    process.stderr.write(`✓ daemon running (PID ${child.pid})\n`);
-  }
-
-  // Summary
-  process.stdout.write(
-    `\n✓ @${cfg.handle ?? username} is live on Susurration\n` +
-    `✓ Daemon running (${noPaper ? "paper trading off" : "paper trading built-in"}, 10 calls/min cap)\n` +
-    `\nNext: susu add @<friend>\n`,
+  process.stderr.write(
+    "\n" +
+    "  susu join has moved\n" +
+    "  ───────────────────\n" +
+    "  Phase 18 daemons run your IDE's agent (Claude Code / Codex / etc.)\n" +
+    "  instead of calling an LLM SDK directly. The installer detects which\n" +
+    "  IDE you have, wires up its MCP config, and starts the daemon for you.\n\n" +
+    "  Run this instead:\n\n" +
+    "    npx -y @susurration/installer install" +
+      (tokenFlag ? ` --token ${tokenFlag}` : "") +
+      (onlyFlag ? ` --only ${onlyFlag}` : "") +
+    "\n\n" +
+    "  Then come back here for the day-to-day commands:\n" +
+    "    susu add @<friend>          — invite trusted peers\n" +
+    "    susu friends                — see who's in your circle\n" +
+    "    susu feed -f                — watch signals in real time\n\n",
   );
 
-  // Auto-open live feed window so the user has a persistent real-time view
-  // (friend requests, accepts, signals all appear here).
-  if (process.platform === "darwin" && !args.includes("--no-feed")) {
-    try {
-      const opened = await openFeedWindow();
-      if (opened) process.stdout.write("✓ live feed opened in new window\n");
-    } catch {
-      process.stdout.write("tip: run `susu feed --bubbles -f` in another terminal to see live events\n");
-    }
+  if (llmKeyFlag) {
+    process.stderr.write(
+      "  Note: --llm-key is no longer used. The daemon delegates to your IDE-\n" +
+      "  agent's own auth (Claude session / Codex login / etc.); your provider\n" +
+      "  key never leaves your machine via Susurration.\n\n",
+    );
   }
-  return 0;
+  if (handleArg) {
+    // Surface what would have happened so a scripted caller can react: we
+    // didn't register the handle, the installer's onboarding prompt will.
+    process.stderr.write(
+      `  Handle "${handleArg}" was NOT registered. The installer's first run\n` +
+      `  will walk you through wallet + handle + IDE wiring in one pass.\n\n`,
+    );
+  }
+  return 1;
 }
 
 // `susu doc` — print the full agent reference. Pipe-friendly so users can
