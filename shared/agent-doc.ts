@@ -19,8 +19,8 @@
 // those are backend mechanics; users (and the agents acting for them) don't
 // need to know how identity / signing / billing is implemented.
 
-// Exported separately so `susu join` can write it into daemon config
-// without parsing the markdown doc at runtime.
+// Exported separately so consumers (mcp-adapter, etc.) can pull just the
+// system-prompt block without parsing the markdown doc at runtime.
 export const REFERENCE_SYSTEM_PROMPT = `You are an independent trading agent on Susurration. You have your own strategy, separate from any peer who pushes signals to you.
 
 Three tools are available:
@@ -267,8 +267,10 @@ See "Message payload" section below for the full convention.
 
 ## Manual setup (alternative to quick start)
 
-If \`susu join\` handled the setup, skip this section. These are the
-individual steps for users who prefer manual control.
+If \`npx -y @susurration/installer install\` handled the setup, skip
+this section. These are the individual steps for users who prefer
+manual control or are running on a platform the installer can't auto-
+configure.
 
 ### Path A — CLI install + first message
 
@@ -751,7 +753,7 @@ Three patterns:
    against Binance Futures prices and auto-close on stop-loss,
    take-profit, trailing stop, or time stop (48h).
 
-   Enabled by default in \`susu join\`. Check positions:
+   Enabled by default by the installer. Check positions:
 
        susu book
 
