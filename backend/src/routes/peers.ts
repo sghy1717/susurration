@@ -16,7 +16,13 @@ import { authedAddress, AuthError } from "../auth.ts";
 
 export const peerRoutes = new Hono();
 
-const MAX_DAYS = 365;
+// Hard cap on the window any caller can request. 365d aggregations on the
+// peer-stats CTE hit ~24s wall-clock on the current DB shape (multiple GROUP
+// BYs across signals/reactions/positions). 120 keeps the worst case well
+// inside the fly-proxy/curl timeout while still covering ~quarterly review.
+// Bumping this further requires the dedicated indexes in 024_peer_indexes.sql
+// and a fresh EXPLAIN ANALYZE — don't raise it blindly.
+const MAX_DAYS = 120;
 const DEFAULT_DAYS = 30;
 const RECENT_SIGNALS_LIMIT = 20;
 

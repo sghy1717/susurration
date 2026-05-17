@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { promises as dns } from "node:dns";
 import { sql } from "../db.ts";
 import {
   issueNonce, verifySignatureAndIssueSession, authedAddress, AuthError,
@@ -8,6 +9,32 @@ import { parseJsonBody, invalidJson } from "../lib/http.ts";
 import { check as rateCheck, RateLimitedError } from "../lib/rate_limit.ts";
 import { recordEvent } from "../lib/events.ts";
 import { generateWebhookSecret } from "../lib/webhook.ts";
+
+// Hostname-substring + resolved-IP check for webhook URLs. Substring catches
+// the easy cases ("localhost", "*.internal"). DNS lookup is the second line:
+// it stops "evil.com → 127.0.0.1" rebinding registrations from passing the
+// textual check today, then resolving to a private IP at delivery time. Both
+// IPv4 and IPv6 private/loopback/link-local ranges are rejected. We don't
+// guard against the time-of-check / time-of-use window in this single
+// validate call — the actual webhook fetcher (when it lands) MUST re-resolve
+// at delivery and apply the same checks.
+const PRIVATE_HOST_PATTERN = /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|0\.|169\.254\.)/;
+function isPrivateOrLoopback(host: string): boolean {
+  const h = host.toLowerCase();
+  return h === "localhost"
+    || h.endsWith(".local")
+    || h.endsWith(".internal")
+    || h === "[::1]"
+    || PRIVATE_HOST_PATTERN.test(h);
+}
+function isPrivateIp(ip: string): boolean {
+  const lower = ip.toLowerCase();
+  if (lower === "::1" || lower === "0:0:0:0:0:0:0:1") return true;
+  if (lower.startsWith("fc") || lower.startsWith("fd")) return true;       // IPv6 ULA
+  if (lower.startsWith("fe80:")) return true;                              // IPv6 link-local
+  if (lower.startsWith("::ffff:")) return isPrivateIp(lower.slice(7));     // IPv4-mapped
+  return PRIVATE_HOST_PATTERN.test(lower);
+}
 
 export const identityRoutes = new Hono();
 
@@ -349,20 +376,39 @@ identityRoutes.post("/identity/webhook", async (c) => {
   if (typeof url !== "string" || !url.startsWith("https://")) {
     return c.json({ error: "webhook_url must be an https:// URL" }, 400);
   }
+  let parsedHost: string;
   try {
-    const parsed = new URL(url);
-    const host = parsed.hostname.toLowerCase();
-    if (
-      host === "localhost" ||
-      host.endsWith(".local") ||
-      host.endsWith(".internal") ||
-      /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|0\.|169\.254\.)/.test(host) ||
-      host === "[::1]"
-    ) {
-      return c.json({ error: "webhook_url must not point to a private/internal address" }, 400);
-    }
+    parsedHost = new URL(url).hostname;
   } catch {
     return c.json({ error: "webhook_url is not a valid URL" }, 400);
+  }
+  if (isPrivateOrLoopback(parsedHost)) {
+    return c.json({ error: "webhook_url must not point to a private/internal address" }, 400);
+  }
+  // DNS resolution defence — text check is necessary but not sufficient;
+  // an attacker can register a public hostname that resolves to 127.0.0.1.
+  // Resolve every A/AAAA record and reject if any falls inside a private
+  // range. 3s timeout so a flaky resolver can't deadlock the request.
+  try {
+    const resolved = await Promise.race([
+      dns.lookup(parsedHost, { all: true, verbatim: true }),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("dns_timeout")), 3000),
+      ),
+    ]);
+    if (resolved.length === 0) {
+      return c.json({ error: "webhook_url did not resolve" }, 400);
+    }
+    for (const r of resolved) {
+      if (isPrivateIp(r.address)) {
+        return c.json({ error: "webhook_url resolves to a private/internal address" }, 400);
+      }
+    }
+  } catch (e: any) {
+    const reason = e?.code === "ENOTFOUND" ? "did_not_resolve"
+                 : e?.message === "dns_timeout" ? "resolver_timeout"
+                 : "resolver_error";
+    return c.json({ error: `webhook_url DNS check failed (${reason})` }, 400);
   }
   const secret = generateWebhookSecret();
   await sql`
