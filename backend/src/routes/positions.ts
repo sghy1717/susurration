@@ -131,6 +131,20 @@ async function validateOpenFields(c: any, body: any, me: string) {
 
 // Insert or fetch existing position. Idempotent on UNIQUE(address, signal_id).
 async function upsertPosition(me: string, f: any): Promise<{ position_id: string; opened_at: Date; existing: boolean }> {
+  // Same peer_username fallback as /signals/:id/accept — paper-sync replays
+  // and legacy daemon direct opens also tend to omit this field. One extra
+  // SELECT per write keeps the dashboard's "From" column honest.
+  let peer_username = f.peer_username;
+  if (peer_username == null) {
+    const author = await sql<{ username: string | null }[]>`
+      SELECT i.username
+      FROM signals s
+      LEFT JOIN identities i ON i.address = s.from_address
+      WHERE s.signal_id = ${f.signal_id}
+      LIMIT 1
+    `;
+    peer_username = author[0]?.username ?? null;
+  }
   const rows = await sql<{ position_id: string; opened_at: Date }[]>`
     INSERT INTO positions (
       address, signal_id, channel_id, token, direction, leverage,
@@ -141,7 +155,7 @@ async function upsertPosition(me: string, f: any): Promise<{ position_id: string
     VALUES (
       ${me}, ${f.signal_id}, ${f.channel_id}, ${f.token}, ${f.direction}, ${f.leverage},
       ${f.entry_price}, ${f.stop_loss}, ${f.take_profit}, ${f.position_usd}, ${f.size_factor},
-      ${f.peer_username}, ${f.is_replay},
+      ${peer_username}, ${f.is_replay},
       ${f.opened_at ? sql`${f.opened_at}::timestamptz` : sql`now()`},
       ${f.daemon_local_id}, ${f.mode}, ${f.broker_position_id}
     )
@@ -218,6 +232,27 @@ positionsRoutes.post("/signals/:signal_id/accept", async (c) => {
       const reaction_id = reactionRows[0]!.reaction_id;
       const reaction_created_at = reactionRows[0]!.created_at;
 
+      // Fall back to the signal author for peer_username when the caller
+      // didn't supply one. The MCP `susu_signal_accept` tool passes whatever
+      // the IDE-agent populates, and agents rarely track per-signal
+      // authorship — they just hand the signal back to be accepted. Without
+      // this fallback the dashboard's "From" column on the position row
+      // ends up empty (?), even though signals.from_address is right there
+      // to be joined. One extra SELECT per accept is cheap; the
+      // alternative is a periodic janitor query, which we used to backfill
+      // 62 historical rows on 2026-05-17.
+      let peer_username_resolved = v.fields.peer_username;
+      if (peer_username_resolved == null) {
+        const author = await tx<{ username: string | null }[]>`
+          SELECT i.username
+          FROM signals s
+          LEFT JOIN identities i ON i.address = s.from_address
+          WHERE s.signal_id = ${v.fields.signal_id}
+          LIMIT 1
+        `;
+        peer_username_resolved = author[0]?.username ?? null;
+      }
+
       // Phase 18.2 (G review #4) — DB writes first, on-chain charge LAST so
       // any reversible failure path leaves the user uncharged. meter() calls
       // chargeUser → on-chain SPL transfer, which is not rollbackable; if it
@@ -236,7 +271,7 @@ positionsRoutes.post("/signals/:signal_id/accept", async (c) => {
           ${v.fields.direction}, ${v.fields.leverage},
           ${v.fields.entry_price}, ${v.fields.stop_loss}, ${v.fields.take_profit},
           ${v.fields.position_usd}, ${v.fields.size_factor},
-          ${v.fields.peer_username}, ${v.fields.is_replay},
+          ${peer_username_resolved}, ${v.fields.is_replay},
           ${v.fields.opened_at ? tx`${v.fields.opened_at}::timestamptz` : tx`now()`},
           ${v.fields.daemon_local_id}, ${v.fields.mode}, ${v.fields.broker_position_id}
         )
