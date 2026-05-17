@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { Shell } from "./Shell";
 import {
   useFriends, usePendingRequests, useChannelGroups, usePeerDetail,
+  useChannelDetail, useChannelMembers,
   formatPnl, formatPercent,
   type Friend, type PendingRequest, type ChannelGroup,
 } from "./hooks";
@@ -17,10 +18,18 @@ import { useLang } from "../i18n";
 
 type LeftTab = "friends" | "channels" | "pending";
 
+// Detail panel target — left rail can pick either a peer (friends tab) or
+// a channel (channels tab). Union'd so DetailPanel can render the right
+// view without two parallel selection states leaking across each other.
+type Selection =
+  | { kind: "peer"; address: string }
+  | { kind: "channel"; channelId: string }
+  | null;
+
 export function FriendsPage() {
   const { t } = useLang();
   const [tab, setTab] = useState<LeftTab>("friends");
-  const [selectedAddress, setSelectedAddress] = useState<string | null>(null);
+  const [selection, setSelection] = useState<Selection>(null);
 
   const { data: friendsResp, refetch: refetchFriends } = useFriends();
   const { data: pendingResp, refetch: refetchPending } = usePendingRequests();
@@ -30,14 +39,14 @@ export function FriendsPage() {
   const pending = pendingResp?.requests ?? [];
   const channels = channelsResp?.groups ?? [];
 
-  // Default selection: first friend once the list arrives. useEffect (not an
-  // inline setTimeout during render) so React 18 strict mode doesn't warn and
-  // the scheduler can batch the update with the rest of the commit phase.
+  // Default selection: first friend when on the friends tab + nothing
+  // selected. Switching to channels tab keeps the user's existing
+  // selection until they pick a channel themselves.
   useEffect(() => {
-    if (selectedAddress == null && friends.length > 0) {
-      setSelectedAddress(friends[0]!.friend_address);
+    if (selection == null && tab === "friends" && friends.length > 0) {
+      setSelection({ kind: "peer", address: friends[0]!.friend_address });
     }
-  }, [friends, selectedAddress]);
+  }, [friends, selection, tab]);
 
   return (
     <Shell
@@ -59,18 +68,18 @@ export function FriendsPage() {
           tab={tab} setTab={setTab}
           friends={friends} pending={pending} channels={channels}
           counts={{ friends: friends.length, channels: channels.length, pending: pending.length }}
-          selected={selectedAddress}
-          onSelect={setSelectedAddress}
+          selection={selection}
+          onSelect={setSelection}
           onChange={() => { refetchFriends(); refetchPending(); }}
         />
-        <DetailPanel address={selectedAddress} channels={channels} />
+        <DetailPanel selection={selection} channels={channels} />
       </div>
     </Shell>
   );
 }
 
 function LeftRail({
-  tab, setTab, friends, pending, channels, counts, selected, onSelect, onChange,
+  tab, setTab, friends, pending, channels, counts, selection, onSelect, onChange,
 }: {
   tab: LeftTab;
   setTab: (t: LeftTab) => void;
@@ -78,8 +87,8 @@ function LeftRail({
   pending: PendingRequest[];
   channels: ChannelGroup[];
   counts: { friends: number; channels: number; pending: number };
-  selected: string | null;
-  onSelect: (addr: string) => void;
+  selection: Selection;
+  onSelect: (s: Selection) => void;
   onChange: () => void;
 }) {
   const { t } = useLang();
@@ -106,8 +115,8 @@ function LeftRail({
               <FriendRow
                 key={f.friend_address}
                 friend={f}
-                selected={f.friend_address === selected}
-                onClick={() => onSelect(f.friend_address)}
+                selected={selection?.kind === "peer" && selection.address === f.friend_address}
+                onClick={() => onSelect({ kind: "peer", address: f.friend_address })}
               />
             ))}
           </>
@@ -118,20 +127,31 @@ function LeftRail({
             <div style={{ color: "var(--susu-ink-subtle)", padding: "var(--susu-s-4)", fontSize: 13 }}>
               {t("v2.friends.empty.channels")}
             </div>
-          ) : channels.map(c => (
-            <div key={c.channel_id} style={{
-              display: "flex", alignItems: "center", gap: "var(--susu-s-3)",
-              padding: "var(--susu-s-3)",
-            }}>
-              <div className="susu-avatar">#</div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div className="susu-mono" style={{ fontSize: 13 }}>{c.name ?? c.channel_id.slice(0, 8)}</div>
-                <div style={{ fontSize: 11, color: "var(--susu-ink-subtle)", fontFamily: "var(--susu-mono)" }}>
-                  {t("v2.friends.members", { n: c.member_count })}
+          ) : channels.map(c => {
+            const isSelected = selection?.kind === "channel" && selection.channelId === c.channel_id;
+            return (
+              <div
+                key={c.channel_id}
+                onClick={() => onSelect({ kind: "channel", channelId: c.channel_id })}
+                style={{
+                  display: "flex", alignItems: "center", gap: "var(--susu-s-3)",
+                  padding: "var(--susu-s-3)",
+                  borderRadius: "var(--susu-r-sm)",
+                  background: isSelected ? "var(--susu-surface-2)" : "transparent",
+                  cursor: "pointer",
+                  marginBottom: 2,
+                }}
+              >
+                <div className="susu-avatar">#</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div className="susu-mono" style={{ fontSize: 13 }}>{c.name ?? c.channel_id.slice(0, 8)}</div>
+                  <div style={{ fontSize: 11, color: "var(--susu-ink-subtle)", fontFamily: "var(--susu-mono)" }}>
+                    {t("v2.friends.members", { n: c.member_count })}
+                  </div>
                 </div>
               </div>
-            </div>
-          ))
+            );
+          })
         )}
 
         {tab === "pending" && (
@@ -287,17 +307,26 @@ function AddFriendInput({ onAdded }: { onAdded: () => void }) {
   );
 }
 
-function DetailPanel({ address, channels }: { address: string | null; channels: ChannelGroup[] }) {
+function DetailPanel({ selection, channels }: { selection: Selection; channels: ChannelGroup[] }) {
   const { t } = useLang();
-  const { data: detail, loading } = usePeerDetail(address);
 
-  if (!address) {
+  if (!selection) {
     return (
       <div className="susu-panel" style={{ padding: "var(--susu-s-8)", color: "var(--susu-ink-subtle)" }}>
         {t("v2.friends.detail.select")}
       </div>
     );
   }
+  if (selection.kind === "channel") {
+    return <ChannelDetailPanel channelId={selection.channelId} />;
+  }
+  return <PeerDetailPanel address={selection.address} channels={channels} />;
+}
+
+function PeerDetailPanel({ address, channels }: { address: string; channels: ChannelGroup[] }) {
+  const { t } = useLang();
+  const { data: detail, loading } = usePeerDetail(address);
+
   if (loading && !detail) {
     return (
       <div className="susu-panel" style={{ padding: "var(--susu-s-8)", color: "var(--susu-ink-subtle)" }}>
@@ -393,6 +422,98 @@ function DetailPanel({ address, channels }: { address: string | null; channels: 
             </div>
           ))
         )}
+      </div>
+    </div>
+  );
+}
+
+// Channel detail — counterpart to PeerDetailPanel. Reuses /channels/:id and
+// /channels/:id/members; doesn't try to surface signal-history aggregates
+// per-channel because peers.ts already does that scoped by user, and a
+// per-channel signal feed is the FeedPage's job. The panel here is
+// purely "what is this room, who's in it, when did it start" — read-only
+// like the rest of v2.
+function ChannelDetailPanel({ channelId }: { channelId: string }) {
+  const { t } = useLang();
+  const { data: detail, loading: detailLoading } = useChannelDetail(channelId);
+  const { data: membersResp, loading: membersLoading } = useChannelMembers(channelId);
+
+  if ((detailLoading && !detail) || (membersLoading && !membersResp)) {
+    return (
+      <div className="susu-panel" style={{ padding: "var(--susu-s-8)", color: "var(--susu-ink-subtle)" }}>
+        {t("v2.friends.detail.loading")}
+      </div>
+    );
+  }
+  if (!detail) {
+    return (
+      <div className="susu-panel" style={{ padding: "var(--susu-s-8)", color: "var(--susu-ink-subtle)" }}>
+        {t("v2.friends.channel.notFound")}
+      </div>
+    );
+  }
+
+  const members = membersResp?.members ?? [];
+  const name = detail.name ?? `#${detail.channel_id.slice(0, 8)}`;
+  const ownerRow = members.find(m => m.address === detail.owner);
+  const ownerLabel = ownerRow?.username ? `@${ownerRow.username}` : `${detail.owner.slice(0, 4)}…${detail.owner.slice(-4)}`;
+
+  return (
+    <div className="susu-panel" style={{ padding: "var(--susu-s-5)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "var(--susu-s-4)", marginBottom: "var(--susu-s-5)" }}>
+        <div className="susu-avatar lg" style={{ fontSize: 18 }}>#</div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="susu-mono" style={{ fontSize: 18, color: "var(--susu-ink)" }}>{name}</div>
+          <div style={{ fontFamily: "var(--susu-mono)", fontSize: 11, color: "var(--susu-ink-subtle)" }}>
+            {detail.is_group ? t("v2.friends.channel.kindGroup") : t("v2.friends.channel.kindDm")}
+            {" · "}
+            {t("v2.friends.channel.createdAt", { ago: formatRelative(detail.created_at) })}
+            {detail.is_group ? `${" · "}${t("v2.friends.channel.owner", { handle: ownerLabel })}` : ""}
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <div style={{
+          display: "flex", justifyContent: "space-between", alignItems: "baseline",
+          marginBottom: "var(--susu-s-3)",
+        }}>
+          <div style={{ fontSize: 14, fontWeight: 500 }}>{t("v2.friends.channel.members")}</div>
+          <div style={{ fontFamily: "var(--susu-mono)", fontSize: 11, color: "var(--susu-ink-subtle)" }}>
+            {t("v2.friends.members", { n: members.length })}
+          </div>
+        </div>
+        <div style={{ border: "1px solid var(--susu-hairline)", borderRadius: "var(--susu-r-md)", overflow: "hidden" }}>
+          {members.length === 0 ? (
+            <div className="susu-empty">{t("v2.friends.channel.empty")}</div>
+          ) : members.map(m => {
+            const handle = m.username ? `@${m.username}` : `${m.address.slice(0, 6)}…`;
+            const isOwner = m.address === detail.owner;
+            return (
+              <div key={m.address} style={{
+                display: "flex", alignItems: "center", gap: "var(--susu-s-3)",
+                padding: "var(--susu-s-3) var(--susu-s-4)",
+                borderBottom: "1px solid var(--susu-hairline)",
+                fontFamily: "var(--susu-mono)", fontSize: 12,
+              }}>
+                <Avatar seed={handle} size={28} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ color: "var(--susu-ink)" }}>
+                    {handle}
+                    {isOwner && (
+                      <span style={{ marginLeft: 8, color: "var(--susu-warn)", fontSize: 10 }}>
+                        {t("v2.friends.channel.ownerTag")}
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ color: "var(--susu-ink-subtle)", fontSize: 10 }}>
+                    {t("v2.friends.channel.joinedAt", { ago: formatRelative(m.joined_at) })}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );

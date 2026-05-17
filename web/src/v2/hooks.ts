@@ -677,6 +677,38 @@ export function useChannelGroups() {
   return usePoll<{ groups: ChannelGroup[] }>("/channels/groups", 30_000);
 }
 
+export interface ChannelMember {
+  address: string;
+  username: string | null;
+  joined_at: string;
+}
+
+export function useChannelMembers(channelId: string | null) {
+  return usePoll<{ members: ChannelMember[] }>(
+    channelId ? `/channels/${encodeURIComponent(channelId)}/members` : null,
+    60_000,
+    channelId != null,
+  );
+}
+
+export interface ChannelDetail {
+  channel_id: string;
+  name: string | null;
+  created_by: string;
+  owner: string;
+  is_group: boolean;
+  meta: Record<string, any> | null;
+  created_at: string;
+}
+
+export function useChannelDetail(channelId: string | null) {
+  return usePoll<ChannelDetail>(
+    channelId ? `/channels/${encodeURIComponent(channelId)}` : null,
+    60_000,
+    channelId != null,
+  );
+}
+
 export function useSignalFeed(limit: number = 200) {
   return usePoll<{ signals: FeedItem[]; count: number; limit: number }>(
     `/signals/feed?limit=${limit}`,

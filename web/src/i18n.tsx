@@ -624,6 +624,15 @@ const dict: Record<Lang, Record<string, string>> = {
     "v2.friends.time.m": "{n}m ago",
     "v2.friends.time.h": "{h}h {m}m ago",
     "v2.friends.time.d": "{n}d ago",
+    "v2.friends.channel.notFound": "Channel not found or you're no longer a member.",
+    "v2.friends.channel.kindGroup": "Group",
+    "v2.friends.channel.kindDm": "Direct message",
+    "v2.friends.channel.createdAt": "created {ago}",
+    "v2.friends.channel.owner": "owner {handle}",
+    "v2.friends.channel.members": "Members",
+    "v2.friends.channel.empty": "No members.",
+    "v2.friends.channel.ownerTag": "owner",
+    "v2.friends.channel.joinedAt": "joined {ago}",
 
     // Mode filter pill (Overview / Book hero)
     "v2.modePill.aria": "Book mode filter",
@@ -1273,6 +1282,15 @@ const dict: Record<Lang, Record<string, string>> = {
     "v2.friends.time.m": "{n} 分前",
     "v2.friends.time.h": "{h} 小时 {m} 分前",
     "v2.friends.time.d": "{n} 天前",
+    "v2.friends.channel.notFound": "频道不存在或你已不是成员。",
+    "v2.friends.channel.kindGroup": "群组",
+    "v2.friends.channel.kindDm": "私聊",
+    "v2.friends.channel.createdAt": "创建于 {ago}",
+    "v2.friends.channel.owner": "群主 {handle}",
+    "v2.friends.channel.members": "成员列表",
+    "v2.friends.channel.empty": "暂无成员。",
+    "v2.friends.channel.ownerTag": "群主",
+    "v2.friends.channel.joinedAt": "加入于 {ago}",
 
     // Mode filter pill
     "v2.modePill.aria": "交易簿模式过滤",
