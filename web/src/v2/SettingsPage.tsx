@@ -28,8 +28,8 @@ function SettingsBody() {
 
   useEffect(() => {
     let cancelled = false;
-    api<{ url: string | null }>({ path: "/identity/webhook" })
-      .then(r => { if (!cancelled) { setWebhookUrl(r.url); setWebhookLoading(false); }})
+    api<{ webhook_url: string | null }>({ path: "/identity/webhook" })
+      .then(r => { if (!cancelled) { setWebhookUrl(r.webhook_url); setWebhookLoading(false); }})
       .catch(() => { if (!cancelled) { setWebhookUrl(null); setWebhookLoading(false); }});
     return () => { cancelled = true; };
   }, []);

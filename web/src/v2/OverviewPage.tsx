@@ -258,7 +258,12 @@ function EquityNarrative({ snapshot }: { snapshot: any }) {
   }
   const pct = (realized_pnl_total / initial_balance_usd) * 100;
   const isUp = realized_pnl_total >= 0;
-  const winRate = Math.round((wins / closed_count) * 100);
+  // Use backend-computed win_rate (categorized denominator) instead of
+  // recomputing wins/closed_count — closed_count includes PnL-pending rows
+  // and would skew the narrative branch (e.g. read "rough" when truth is "drift").
+  const winRate = snapshot.win_rate != null
+    ? Math.round(snapshot.win_rate * 100)
+    : Math.round((wins / Math.max(1, wins + losses + break_even)) * 100);
   const beClause = break_even > 0 ? t("v2.ov.narrative.be", { n: break_even }) : "";
   const trailing = isUp
     ? (winRate >= 60 ? t("v2.ov.narrative.drift") : t("v2.ov.narrative.mixed"))

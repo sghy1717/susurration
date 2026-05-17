@@ -89,7 +89,13 @@ bookRoutes.get("/book/snapshot", async (c) => {
   `;
   const reactAgg = reactRows[0]!;
 
-  const win_rate = posAgg.closed_count > 0 ? posAgg.wins / posAgg.closed_count : null;
+  // win_rate is over CATEGORIZED outcomes only — wins + losses + break_even.
+  // closed_count can be larger because positions with exit_pnl_usd IS NULL
+  // (PnL sync pending after a fill) still count as "closed" but haven't been
+  // labelled yet; treating them as non-wins makes the rate look catastrophic
+  // (e.g. 4/34 = 12% when the real categorized rate is 4/7 = 57%).
+  const categorized = posAgg.wins + posAgg.losses + posAgg.break_even;
+  const win_rate = categorized > 0 ? posAgg.wins / categorized : null;
   const accept_rate_24h = sigAgg.signals_received_24h > 0 ? reactAgg.accepted_24h / sigAgg.signals_received_24h : null;
   const accept_rate_30d = sigAgg.signals_received_30d > 0 ? reactAgg.accepted_30d / sigAgg.signals_received_30d : null;
 
