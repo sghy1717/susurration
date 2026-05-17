@@ -7,6 +7,7 @@ import { Link } from "react-router-dom";
 import { Shell, useNow } from "./Shell";
 import {
   useBookSnapshot, useBookEquity, useOpenPositions, useDaemonState,
+  useDaemonUpgrade,
   usePeersStats, useChannelGroups, useSignalFeed, usePrices,
   pnlOf, durationStr, formatMoney, formatPnl, formatPercent,
   type Position, type ModeFilter,
@@ -256,15 +257,18 @@ function EquityNarrative({ snapshot }: { snapshot: any }) {
       </p>
     );
   }
+  // We drop the "{wins}W / {losses}L across {closed_count} trades" prefix on
+  // purpose: closed_count is the raw count (includes positions still syncing
+  // their exit PnL), wins+losses+break_even is the categorized subset, and
+  // the two diverge whenever a fill is mid-sync. Surfacing both numbers next
+  // to each other reads as broken arithmetic to anyone glancing at it.
+  // Keep what's actually informative: the categorized win rate, the dollar
+  // return vs initial capital, and the qualitative trailing sentence.
   const pct = (realized_pnl_total / initial_balance_usd) * 100;
   const isUp = realized_pnl_total >= 0;
-  // Use backend-computed win_rate (categorized denominator) instead of
-  // recomputing wins/closed_count — closed_count includes PnL-pending rows
-  // and would skew the narrative branch (e.g. read "rough" when truth is "drift").
   const winRate = snapshot.win_rate != null
     ? Math.round(snapshot.win_rate * 100)
     : Math.round((wins / Math.max(1, wins + losses + break_even)) * 100);
-  const beClause = break_even > 0 ? t("v2.ov.narrative.be", { n: break_even }) : "";
   const trailing = isUp
     ? (winRate >= 60 ? t("v2.ov.narrative.drift") : t("v2.ov.narrative.mixed"))
     : (winRate >= 50 ? t("v2.ov.narrative.redOk") : t("v2.ov.narrative.rough"));
@@ -276,10 +280,9 @@ function EquityNarrative({ snapshot }: { snapshot: any }) {
       maxWidth: "60ch",
     }}>
       <strong style={{ color: "var(--susu-ink)", fontWeight: 500 }}>
-        {wins} {t(wins === 1 ? "v2.ov.narrative.win.one" : "v2.ov.narrative.win.many")}, {losses} {t(losses === 1 ? "v2.ov.narrative.loss.one" : "v2.ov.narrative.loss.many")}{beClause}
+        {t("v2.ov.narrative.winRate", { pct: winRate })}
       </strong>{" "}
-      {t("v2.ov.narrative.across", { n: closed_count })}{" "}
-      {t(closed_count === 1 ? "v2.ov.narrative.trade.one" : "v2.ov.narrative.trade.many")} ·{" "}
+      ·{" "}
       <span style={{ color: isUp ? "var(--susu-pos)" : "var(--susu-neg)" }}>
         {isUp ? "+" : ""}{pct.toFixed(2)}%
       </span>{" "}
@@ -337,8 +340,26 @@ function PositionRow({ p, mark, now }: { p: Position; mark: number | null; now: 
 function AgentStatePanel() {
   const { t } = useLang();
   const { data: daemon } = useDaemonState();
+  const upgrade = useDaemonUpgrade();
   const now = useNow();
   if (!daemon) return null;
+
+  // Version cell renders the running version, and if a newer one is on
+  // npm, marks the row with a yellow "upgrade available" hint so the
+  // user can see it without reading the floating banner. Click target
+  // remains the banner — this cell is read-only by design.
+  const versionCell = daemon.version ? (
+    upgrade.needsUpgrade && upgrade.latestVersion ? (
+      <span style={{ display: "inline-flex", gap: 6, alignItems: "baseline" }}>
+        <span>v{daemon.version}</span>
+        <span style={{ color: "var(--susu-warn)", fontSize: 10 }}>
+          {t("v2.ov.agent.upgradeAvailable", { latest: upgrade.latestVersion })}
+        </span>
+      </span>
+    ) : (
+      `v${daemon.version}`
+    )
+  ) : "—";
 
   const rows: Array<[string, React.ReactNode]> = [
     [t("v2.ov.agent.daemon"), daemon.status === "online" && daemon.started_at
@@ -351,7 +372,7 @@ function AgentStatePanel() {
     [t("v2.ov.agent.broker"), daemon.broker_connected ? t("v2.ov.agent.brokerConnected") : <span style={{ color: "var(--susu-ink-subtle)" }}>{t("v2.ov.agent.brokerNot")}</span>],
     [t("v2.ov.agent.conv"), daemon.conv_threshold != null ? daemon.conv_threshold.toFixed(2) : "—"],
     [t("v2.ov.agent.minSize"), daemon.min_size_factor != null ? daemon.min_size_factor.toFixed(2) : "—"],
-    [t("v2.ov.agent.version"), daemon.version ? `v${daemon.version}` : "—"],
+    [t("v2.ov.agent.version"), versionCell],
   ];
 
   return (

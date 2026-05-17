@@ -188,6 +188,27 @@ export interface Prices { prices: Record<string, number>; }
 const pollCache = new Map<string, { data: unknown; ts: number }>();
 const inflight = new Map<string, Promise<unknown>>();
 
+// Every active usePoll subscriber registers a refetch callback here so that
+// (a) visibilitychange "visible" can wake all of them at once and
+// (b) SSE reconnects can ask the feed/peers/etc. to re-snapshot.
+// Module-level (not React context) so it lives across mount/unmount cycles.
+const visibilityRefetchers = new Set<() => void>();
+
+let visibilityListenerInstalled = false;
+function ensureVisibilityListener(): void {
+  if (visibilityListenerInstalled || typeof document === "undefined") return;
+  visibilityListenerInstalled = true;
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      // Tab just came back; setInterval may have been throttled to once per
+      // minute or longer in the background, so the on-screen data can be
+      // stale by an arbitrary amount. Fire every active refetcher to catch
+      // the UI up before the user can perceive the lag.
+      for (const fn of visibilityRefetchers) fn();
+    }
+  });
+}
+
 export function clearPollCache(): void { pollCache.clear(); inflight.clear(); }
 // Expose on window so api.ts session.clear can drop our cache without
 // a circular import at module-load time.
@@ -249,9 +270,17 @@ function usePoll<T>(
     }
     fetchOnce();
     const id = setInterval(fetchOnce, intervalMs);
+    // Register in the visibility-driven refetch set. When the tab comes
+    // back to the foreground after a long idle, the runtime fires every
+    // registered fn so the user sees fresh data immediately instead of
+    // waiting for the next setInterval tick (which may have been
+    // throttled to once per minute in the background).
+    ensureVisibilityListener();
+    visibilityRefetchers.add(fetchOnce);
     return () => {
       mountedRef.current = false;
       clearInterval(id);
+      visibilityRefetchers.delete(fetchOnce);
     };
   }, [path, intervalMs, enabled, fetchOnce]);
 
@@ -581,8 +610,20 @@ export function useFeedSSE(initial: FeedItem[]) {
   useEffect(() => {
     let cancelled = false;
     let es: EventSource | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let attempt = 0;
+
+    function scheduleReconnect() {
+      if (cancelled) return;
+      attempt += 1;
+      // Exponential backoff capped at 30s. 1s, 2s, 4s, 8s, 16s, 30s, 30s…
+      const delay = Math.min(30_000, 1_000 * Math.pow(2, attempt - 1));
+      reconnectTimer = setTimeout(connect, delay);
+    }
 
     async function connect() {
+      reconnectTimer = null;
+      if (cancelled) return;
       try {
         setState(s => ({ ...s, status: "connecting", error: null }));
         // Mint a short-lived stream token (EventSource can't send headers).
@@ -595,11 +636,25 @@ export function useFeedSSE(initial: FeedItem[]) {
         es = new EventSource(url);
         es.onopen = () => {
           if (cancelled) return;
+          attempt = 0;  // success — reset backoff
           setState(s => ({ ...s, status: "open", error: null }));
+          // When the stream comes back from a disconnect (mobile sleep,
+          // wifi blip, etc.), polled views (positions / book / friends)
+          // may also be stale. Nudge every active usePoll subscriber to
+          // re-snapshot so the rest of the UI catches up alongside the
+          // resumed stream.
+          for (const fn of visibilityRefetchers) fn();
         };
         es.onerror = () => {
           if (cancelled) return;
           setState(s => ({ ...s, status: "error", error: "stream disconnected" }));
+          // EventSource will auto-reconnect on its own, but only while the
+          // page is foregrounded — backgrounded tabs see it stay dead.
+          // Close + manually retry with our own backoff so we drive the
+          // reconnect ourselves and it works regardless of visibility.
+          es?.close();
+          es = null;
+          scheduleReconnect();
         };
         const ingest = (e: MessageEvent) => {
           if (cancelled || !e.data) return;
@@ -612,12 +667,37 @@ export function useFeedSSE(initial: FeedItem[]) {
       } catch (e) {
         if (cancelled) return;
         setState(s => ({ ...s, status: "error", error: e instanceof Error ? e.message : String(e) }));
+        scheduleReconnect();
       }
     }
+
+    // Tab-visibility hook — if the stream went into error / connecting state
+    // while the tab was hidden, force a fresh connect the moment it comes
+    // back. Cheap (token mint + EventSource open ~150ms) and avoids the
+    // user staring at stale data until the next backoff tick fires.
+    function onVisibilityChange() {
+      if (cancelled) return;
+      if (document.visibilityState !== "visible") return;
+      if (es && es.readyState === EventSource.OPEN) return;
+      if (reconnectTimer != null) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      attempt = 0;
+      connect();
+    }
+
     if (session.token) connect();
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onVisibilityChange);
+    }
     return () => {
       cancelled = true;
+      if (reconnectTimer != null) clearTimeout(reconnectTimer);
       es?.close();
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", onVisibilityChange);
+      }
     };
   }, []);
 

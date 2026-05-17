@@ -143,6 +143,13 @@ export function Shell({ pageLabel, topbarAux, topbarActions, children }: ShellPr
               {topbarAux}
             </div>
           )}
+          {/* Topbar shows only the at-a-glance state: live/stale dot + label
+              + execution mode. Uptime, version, and version-mismatch hints
+              all moved into the Agent state panel on Overview so we don't
+              repeat the same metadata in two places (the rail logo on the
+              left already makes the band crowded, and uptime/version are
+              not actionable from the topbar — they're context for the
+              Agent state card). */}
           <div style={{
             display: "flex", alignItems: "center", gap: "var(--susu-s-3)",
             fontFamily: "var(--susu-mono)", fontSize: 11, color: "var(--susu-ink-subtle)",
@@ -153,13 +160,7 @@ export function Shell({ pageLabel, topbarAux, topbarActions, children }: ShellPr
               : daemon?.status === "stale" ? "warn"
               : "idle"
             } />
-            <span>{t("v2.shell.daemonStatus", { status: t(statusKey), uptime: uptimeText })}</span>
-            {daemon?.version && (
-              <>
-                <span style={{ opacity: 0.4 }}>·</span>
-                <span>v{daemon.version}</span>
-              </>
-            )}
+            <span>daemon {t(statusKey)}</span>
             <span style={{ opacity: 0.4 }}>·</span>
             <ModePill mode={daemon?.execution_mode ?? null} />
           </div>
