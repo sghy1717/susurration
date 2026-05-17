@@ -245,6 +245,20 @@ async function cmdJoin(args: string[]): Promise<number> {
   const llmKeyFlag = pickFlag(args, "--llm-key");
   const handleArg = args.find(a => !a.startsWith("-"));
 
+  // The deprecation message prints a copy-pasteable installer command. The
+  // values come from process.argv so a malicious / careless caller could pass
+  // e.g. --token 'sk_x; rm -rf ~'. We don't exec it, but a human who selects
+  // and pastes the echoed line into their shell would. Safe-pass values that
+  // look like a plain flag; for anything containing shell metacharacters,
+  // print a warning and ask the user to re-enter the value in the installer
+  // prompt instead.
+  const SAFE_FLAG_VALUE = /^[A-Za-z0-9._\-]+$/;
+  const safeToken = tokenFlag && SAFE_FLAG_VALUE.test(tokenFlag) ? tokenFlag : null;
+  const safeOnly = onlyFlag && SAFE_FLAG_VALUE.test(onlyFlag) ? onlyFlag : null;
+  const droppedFlags: string[] = [];
+  if (tokenFlag && !safeToken) droppedFlags.push("--token");
+  if (onlyFlag && !safeOnly) droppedFlags.push("--only");
+
   process.stderr.write(
     "\n" +
     "  susu join has moved\n" +
@@ -254,8 +268,8 @@ async function cmdJoin(args: string[]): Promise<number> {
     "  IDE you have, wires up its MCP config, and starts the daemon for you.\n\n" +
     "  Run this instead:\n\n" +
     "    npx -y @susurration/installer install" +
-      (tokenFlag ? ` --token ${tokenFlag}` : "") +
-      (onlyFlag ? ` --only ${onlyFlag}` : "") +
+      (safeToken ? ` --token ${safeToken}` : "") +
+      (safeOnly ? ` --only ${safeOnly}` : "") +
     "\n\n" +
     "  Then come back here for the day-to-day commands:\n" +
     "    susu add @<friend>          — invite trusted peers\n" +
@@ -263,6 +277,13 @@ async function cmdJoin(args: string[]): Promise<number> {
     "    susu feed -f                — watch signals in real time\n\n",
   );
 
+  if (droppedFlags.length > 0) {
+    process.stderr.write(
+      `  Note: ${droppedFlags.join(" / ")} value contained shell metacharacters\n` +
+      `  and was omitted from the redirect command above. Re-enter it directly\n` +
+      `  when the installer prompts.\n\n`,
+    );
+  }
   if (llmKeyFlag) {
     process.stderr.write(
       "  Note: --llm-key is no longer used. The daemon delegates to your IDE-\n" +
@@ -271,11 +292,11 @@ async function cmdJoin(args: string[]): Promise<number> {
     );
   }
   if (handleArg) {
-    // Surface what would have happened so a scripted caller can react: we
-    // didn't register the handle, the installer's onboarding prompt will.
+    // Echo back without injecting into a shell-runnable line — purely
+    // informational so scripted callers can detect that the redirect happened.
     process.stderr.write(
-      `  Handle "${handleArg}" was NOT registered. The installer's first run\n` +
-      `  will walk you through wallet + handle + IDE wiring in one pass.\n\n`,
+      `  (Handle argument was NOT registered. The installer's first run\n` +
+      `  walks through wallet + handle + IDE wiring in one pass.)\n\n`,
     );
   }
   return 1;

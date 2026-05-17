@@ -16,8 +16,8 @@
     "paper_trading",
     "mcp_integration"
   ],
-  "install": "npm install -g susurration",
-  "quick_start": "susu join",
+  "install": "npx -y @susurration/installer install",
+  "quick_start": "npx -y @susurration/installer install",
   "mcp": {
     "package": "@susurration/mcp",
     "install": "npx -y @susurration/mcp"

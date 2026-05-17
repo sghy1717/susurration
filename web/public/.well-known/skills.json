@@ -41,6 +41,6 @@
   },
   "cli": {
     "install": "npm install -g susurration",
-    "quick_start": "susu join"
+    "quick_start": "npx -y @susurration/installer install"
   }
 }
