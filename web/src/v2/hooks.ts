@@ -194,6 +194,82 @@ const inflight = new Map<string, Promise<unknown>>();
 // Module-level (not React context) so it lives across mount/unmount cycles.
 const visibilityRefetchers = new Set<() => void>();
 
+// ── Persistent SWR layer ────────────────────────────────────────────────
+//
+// Memory cache only survives within a single page lifetime; reload nukes it
+// and the user sees a 1-2 second "empty dashboard" while every endpoint
+// re-fetches in parallel. We mirror small endpoint responses into
+// localStorage so a hard refresh can paint the last-known snapshot
+// instantly, then background-revalidate. Big endpoints (feed/* with their
+// 500-event payloads, /prices with its tick churn) skip the persist layer
+// — feed is reconstructed by SSE and prices change too fast to be useful
+// stale.
+const PERSIST_PREFIX = "susu.v2.cache:";
+// Per-entry size cap. 100 KB is plenty for any snapshot we care about and
+// keeps a runaway response from eating the entire 5-10 MB localStorage
+// budget. Computed lazily because TextEncoder isn't free on every write.
+const PERSIST_MAX_BYTES = 100_000;
+// How long a stored snapshot is allowed to be served as the initial paint.
+// We still revalidate immediately in the background — this is just a
+// guard against a user reopening a tab after a week of laptop-sleep and
+// seeing dashboard content from a week ago. 24h chosen so overnight tab
+// reopens still benefit, but a long-abandoned tab triggers a clean reload.
+const PERSIST_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+// Endpoints we deliberately keep memory-only. signals/feed payload is too
+// large and SSE owns its replay; prices change too fast to be useful from
+// disk.
+const PERSIST_SKIP_PREFIXES = ["/signals/feed", "/prices", "/auth/stream-token"];
+
+function shouldPersist(path: string): boolean {
+  return !PERSIST_SKIP_PREFIXES.some(p => path.startsWith(p));
+}
+
+function loadPersisted<T>(path: string): { data: T; ts: number } | null {
+  if (!shouldPersist(path)) return null;
+  try {
+    const raw = localStorage.getItem(PERSIST_PREFIX + path);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { data: T; ts: number };
+    if (typeof parsed?.ts !== "number") return null;
+    if (Date.now() - parsed.ts > PERSIST_MAX_AGE_MS) {
+      // Stale beyond our serve window. Drop it so we don't paint week-old
+      // numbers as if they were current.
+      localStorage.removeItem(PERSIST_PREFIX + path);
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function savePersisted(path: string, data: unknown): void {
+  if (!shouldPersist(path)) return;
+  try {
+    const payload = JSON.stringify({ data, ts: Date.now() });
+    if (payload.length > PERSIST_MAX_BYTES) return;  // skip oversized
+    localStorage.setItem(PERSIST_PREFIX + path, payload);
+  } catch {
+    // localStorage quota / private mode / SecurityError — degrade silently
+    // to memory-only behaviour. Don't try to evict here; the user will
+    // bounce back fine on the next session.set() clear.
+  }
+}
+
+/** Purge every persisted cache entry. Called from session.clear() on
+ *  sign-out and from session.set() when a different account logs in
+ *  (cross-account pollution prevention). */
+export function clearPersistedCache(): void {
+  try {
+    const keys: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(PERSIST_PREFIX)) keys.push(k);
+    }
+    for (const k of keys) localStorage.removeItem(k);
+  } catch { /* never fatal */ }
+}
+
 let visibilityListenerInstalled = false;
 function ensureVisibilityListener(): void {
   if (visibilityListenerInstalled || typeof document === "undefined") return;
@@ -209,7 +285,11 @@ function ensureVisibilityListener(): void {
   });
 }
 
-export function clearPollCache(): void { pollCache.clear(); inflight.clear(); }
+export function clearPollCache(): void {
+  pollCache.clear();
+  inflight.clear();
+  clearPersistedCache();
+}
 // Expose on window so api.ts session.clear can drop our cache without
 // a circular import at module-load time.
 if (typeof window !== "undefined") {
@@ -223,10 +303,28 @@ function usePoll<T>(
 ): { data: T | null; error: ApiError | null; loading: boolean; refetch: () => void } {
   // Seed state from cache so a fresh-mount component renders prior data
   // immediately instead of flashing a loading state.
-  const cached = path ? (pollCache.get(path)?.data as T | undefined) : undefined;
-  const [data, setData] = useState<T | null>(cached ?? null);
+  //   1. memory cache wins (same page lifetime)
+  //   2. fall back to localStorage snapshot from a previous tab/session
+  // Either way, we always trigger a background fetch — the seed is just
+  // there to keep the UI populated during the round-trip.
+  let seed: T | undefined;
+  if (path) {
+    const mem = pollCache.get(path);
+    if (mem) {
+      seed = mem.data as T;
+    } else {
+      const persisted = loadPersisted<T>(path);
+      if (persisted) {
+        seed = persisted.data;
+        // Hydrate memory cache so peer components mounting in the same
+        // page lifetime hit memory, not localStorage, on subsequent reads.
+        pollCache.set(path, { data: persisted.data, ts: persisted.ts });
+      }
+    }
+  }
+  const [data, setData] = useState<T | null>(seed ?? null);
   const [error, setError] = useState<ApiError | null>(null);
-  const [loading, setLoading] = useState<boolean>(cached === undefined);
+  const [loading, setLoading] = useState<boolean>(seed === undefined);
   // mountedRef guards setState calls from in-flight fetches that resolve
   // after the component unmounts (common on rapid tab switches now that
   // the cache makes navigation feel instant). Without it React warns
@@ -249,6 +347,9 @@ function usePoll<T>(
     try {
       const res = await pending;
       pollCache.set(path, { data: res, ts: Date.now() });
+      // Mirror to localStorage so the next cold reload can paint this
+      // value before the network round-trip completes.
+      savePersisted(path, res);
       if (!mountedRef.current) return;
       setData(res);
       setError(null);
@@ -267,6 +368,15 @@ function usePoll<T>(
     if (pollCache.has(path)) {
       setData(pollCache.get(path)!.data as T);
       setLoading(false);
+    } else {
+      // Memory missed, but localStorage may still have a snapshot from a
+      // previous session — hydrate it before the network call resolves.
+      const persisted = loadPersisted<T>(path);
+      if (persisted) {
+        pollCache.set(path, { data: persisted.data, ts: persisted.ts });
+        setData(persisted.data);
+        setLoading(false);
+      }
     }
     fetchOnce();
     const id = setInterval(fetchOnce, intervalMs);

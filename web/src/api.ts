@@ -64,6 +64,13 @@ export const session = {
   get token(): string | null { return readWithFallback(TOKEN_KEY, LEGACY_TOKEN_KEY); },
   get address(): string | null { return readWithFallback(ADDRESS_KEY, LEGACY_ADDRESS_KEY); },
   set(token: string, address: string) {
+    // If the incoming token belongs to a different identity than what's in
+    // storage, drop every persisted snapshot so the new user's first paint
+    // doesn't briefly show the previous user's data. Same-identity logins
+    // (token refresh) skip the wipe.
+    const prevAddress = localStorage.getItem(ADDRESS_KEY) ?? localStorage.getItem(LEGACY_ADDRESS_KEY);
+    const identityChanged = prevAddress != null && prevAddress !== address;
+
     // Write to both key shapes so users bouncing between v0 (/v0/dashboard
     // escape hatch) and v2 stay logged in either way during the transition.
     localStorage.setItem(TOKEN_KEY, token);
@@ -72,6 +79,13 @@ export const session = {
       localStorage.setItem(LEGACY_TOKEN_KEY, token);
       localStorage.setItem(LEGACY_ADDRESS_KEY, address);
     } catch { /* quota */ }
+
+    if (identityChanged) {
+      try {
+        const mod = (window as any).__susuClearPollCache;
+        if (typeof mod === "function") mod();
+      } catch { /* never fatal */ }
+    }
   },
   clear() {
     localStorage.removeItem(TOKEN_KEY);
