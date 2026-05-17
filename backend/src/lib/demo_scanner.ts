@@ -80,7 +80,18 @@ async function fetchJson<T>(url: string): Promise<T | null> {
 type BinanceTicker = { symbol: string; lastPrice: string; priceChangePercent: string; quoteVolume: string };
 type BinancePremiumIndex = { symbol: string; lastFundingRate: string };
 type BinanceOIHist = { sumOpenInterestValue: string };
-type BinanceExchangeSymbol = { symbol: string; contractType: string; quoteAsset: string; status: string };
+type BinanceExchangeSymbol = { symbol: string; baseAsset: string; contractType: string; quoteAsset: string; status: string };
+
+// Stablecoin-base perps (USDCUSDT, FDUSDUSDT, etc.) are tradable on Binance
+// but their "FR flips + OI piles up" signal is structurally meaningless:
+// the pair pins to ~1.00 and any FR sign is a thin-orderbook artifact, not
+// a directional setup. Excluding them up front keeps the demo signal stream
+// honest. List captures every USD-pegged base ever listed as a Binance perp;
+// safe to be inclusive because a non-stable base is never going to collide.
+const STABLECOIN_BASES = new Set([
+  "USDC", "BUSD", "TUSD", "FDUSD", "DAI", "FRAX",
+  "USDP", "USDD", "PYUSD", "USDE", "USTC", "EURI",
+]);
 
 interface ScanSignal {
   symbol: string;
@@ -99,7 +110,12 @@ async function scan(): Promise<ScanSignal[]> {
   const info = await fetchJson<{ symbols: BinanceExchangeSymbol[] }>("https://fapi.binance.com/fapi/v1/exchangeInfo");
   if (!info) return [];
   const symbols = info.symbols
-    .filter(s => s.contractType === "PERPETUAL" && s.quoteAsset === "USDT" && s.status === "TRADING")
+    .filter(s =>
+      s.contractType === "PERPETUAL" &&
+      s.quoteAsset === "USDT" &&
+      s.status === "TRADING" &&
+      !STABLECOIN_BASES.has(s.baseAsset)
+    )
     .map(s => s.symbol);
 
   const tickers = await fetchJson<BinanceTicker[]>("https://fapi.binance.com/fapi/v1/ticker/24hr");
