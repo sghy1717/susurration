@@ -186,7 +186,16 @@ export interface Prices { prices: Record<string, number>; }
 // changes (sign-out) wipe it via api.session.clear → see api.ts.
 
 const pollCache = new Map<string, { data: unknown; ts: number }>();
-const inflight = new Map<string, Promise<unknown>>();
+// Inflight entry carries the AbortController alongside the promise so
+// the timeout path can really cancel the underlying fetch (releasing
+// the socket + headers + body parser) instead of just rejecting our
+// own await while the request keeps occupying a slot in the browser's
+// connection pool.
+interface InflightEntry {
+  promise: Promise<unknown>;
+  ctrl: AbortController;
+}
+const inflight = new Map<string, InflightEntry>();
 
 // Every active usePoll subscriber registers a refetch callback here so that
 // (a) visibilitychange "visible" can wake all of them at once and
@@ -336,39 +345,59 @@ function usePoll<T>(
     if (!path || !enabled) return;
     // Dedupe: if another component already has an in-flight request for
     // this path, attach to it instead of issuing a parallel call.
-    let pending = inflight.get(path) as Promise<T> | undefined;
-    if (!pending) {
-      pending = api<T>({ path });
-      inflight.set(path, pending as Promise<unknown>);
-      pending.finally(() => {
-        if (inflight.get(path) === pending) inflight.delete(path);
+    let entry = inflight.get(path);
+    if (!entry) {
+      const ctrl = new AbortController();
+      const promise = api<T>({ path, signal: ctrl.signal });
+      entry = { promise, ctrl };
+      inflight.set(path, entry);
+      promise.finally(() => {
+        if (inflight.get(path) === entry) inflight.delete(path);
       });
     }
+    const pending = entry.promise as Promise<T>;
+    const entryRef = entry;
+
+    // Client-side timeout sleeve. Without it a stalled connection
+    // (mid-stream RST, proxy black-hole, browser conn-pool starvation
+    // under SSE + parallel polls, etc.) leaves the await pending
+    // forever — the consumer's loading state stays pinned at true and
+    // every subsequent tick re-awaits the same dead promise.
+    // 15s is well past the p99 of any endpoint we hit (peers/stats was
+    // the previous worst at ~24s before MAX_DAYS got capped to 120;
+    // everything else is sub-second). If a real request needs more,
+    // the next interval tick will retry with a fresh attempt.
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    const timeoutPromise = new Promise<T>((_, reject) => {
+      timeoutId = setTimeout(() => {
+        // Three things happen together so the next tick is clean:
+        //  1. evict the stuck entry so subsequent fetchOnce() calls
+        //     don't dedupe onto this dead promise
+        //  2. abort the underlying fetch so the browser releases the
+        //     socket / response stream slot (previously the connection
+        //     leaked even though our await had already rejected, which
+        //     starved Chrome's 6-per-origin pool under heavy polling)
+        //  3. reject our awaiter with a typed client_timeout error so
+        //     the consumer's catch / finally path can run
+        if (inflight.get(path) === entryRef) inflight.delete(path);
+        entryRef.ctrl.abort();
+        reject(new ApiError(0, "client_timeout", path));
+      }, 15_000);
+    });
+    // Pre-attach a swallow handler so if `pending` wins the race the
+    // setTimeout's eventual reject doesn't surface as an unhandled
+    // promise rejection in the browser console. Without this, every
+    // fast response (the 99% case) logged a noisy stack on each tick.
+    timeoutPromise.catch(() => {});
+
     try {
-      // Client-side timeout sleeve. Without it a stalled connection
-      // (mid-stream RST, proxy black-hole, browser conn-pool starvation
-      // under SSE + parallel polls, etc.) leaves the await pending
-      // forever, which leaves the consumer's loading state pinned at
-      // true with no error to act on. 15s is well past the p99 of the
-      // endpoints we call here (peers/stats was the previous slowest
-      // at ~24s before MAX_DAYS got capped to 120; everything else is
-      // sub-second). If a real request needs more, the next interval
-      // tick will retry.
-      const res = await Promise.race<T>([
-        pending as Promise<T>,
-        new Promise<T>((_, reject) =>
-          setTimeout(() => {
-            // Critical: evict the stuck promise from `inflight` BEFORE
-            // rejecting. Otherwise on every subsequent setInterval tick
-            // fetchOnce sees inflight.get(path) hit, re-awaits the same
-            // dead promise, races the same timeout, and the view stays
-            // empty forever. With this evict, the next tick spawns a
-            // fresh fetch attempt with a clean Promise.
-            if (inflight.get(path) === pending) inflight.delete(path);
-            reject(new ApiError(0, "client_timeout", path));
-          }, 15_000),
-        ),
-      ]);
+      const res = await Promise.race<T>([pending, timeoutPromise]);
+      // pending won — cancel the pending timeout so the abort + reject
+      // closure doesn't fire after we've already moved on.
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
       pollCache.set(path, { data: res, ts: Date.now() });
       // Mirror to localStorage so the next cold reload can paint this
       // value before the network round-trip completes.
@@ -377,6 +406,14 @@ function usePoll<T>(
       setData(res);
       setError(null);
     } catch (e) {
+      // Make sure we don't leave a setTimeout ticking after a rejection
+      // (e.g. pending rejected with a 401 or a network error). Otherwise
+      // the timer fires later, aborts the next fetch on the same path
+      // by recognizing a stale entryRef, and we briefly look broken.
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
       if (!mountedRef.current) return;
       if (e instanceof ApiError) setError(e);
       else setError(new ApiError(0, String(e), path));

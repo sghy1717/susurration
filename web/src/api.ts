@@ -34,6 +34,11 @@ export interface ApiCall<T = any> {
   path: string;
   body?: unknown;
   auth?: boolean;
+  /** AbortSignal to forcibly cancel the underlying fetch. usePoll's
+   *  client-side timeout uses this so a stalled socket actually gets
+   *  released (rather than leaked while the consumer just reject's its
+   *  own await). Callers without timeouts can omit. */
+  signal?: AbortSignal;
 }
 
 export class ApiError extends Error {
@@ -53,6 +58,7 @@ export async function api<T = any>(call: ApiCall<T>): Promise<T> {
     method: call.method ?? "GET",
     headers,
     body: call.body === undefined ? undefined : JSON.stringify(call.body),
+    signal: call.signal,
   });
   const ct = resp.headers.get("content-type") ?? "";
   const body: any = ct.includes("application/json") ? await resp.json() : await resp.text();
