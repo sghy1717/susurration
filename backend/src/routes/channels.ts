@@ -184,6 +184,166 @@ channelRoutes.get("/channels/:id/members", async (c) => {
   return c.json({ members: rows });
 });
 
+// ─── GET /channels/:id/stats ─────────────────────────────────────────────
+// Channel-scoped counterpart to /peers/:address/stats. Returns the same
+// shape of aggregates (signal count, accept rate, opens/closes, wins/losses,
+// realized PnL) but rolled up over signals INSIDE this channel rather than
+// from a single peer. Used by the v2 Friends&Channels panel so a user can
+// judge whether a group is worth staying in.
+//
+// `signal_count` deliberately includes signals from every member of the
+// channel — including the caller — so the number matches what they'd see
+// scrolling the feed scoped to this channel.
+//
+// PnL / open / win-loss only count positions the caller themselves opened
+// from signals in this channel (positions table has channel_id, FK'd to
+// channels). Other members' positions are not visible — privacy boundary.
+channelRoutes.get("/channels/:id/stats", async (c) => {
+  let me: string;
+  try { me = await withAuth(c); } catch (e) { return authError(c, e); }
+  const channelId = c.req.param("id");
+  const daysRaw = Number(c.req.query("days") ?? "30");
+  const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(120, Math.floor(daysRaw))) : 30;
+
+  const exists = await sql`SELECT 1 FROM channels WHERE channel_id = ${channelId}`;
+  if (exists.length === 0) return c.json({ error: "channel not found" }, 404);
+  if (!(await isMember(sql, channelId, me))) return c.json({ error: "not a member" }, 403);
+
+  const rows = await sql<{
+    signal_count: number;
+    distinct_pushers: number;
+    avg_conv: number | null;
+    last_signal_at: string | null;
+    accepted_signals: number;
+    opens: number;
+    closes: number;
+    wins: number;
+    losses: number;
+    realized_pnl_usd: number;
+  }[]>`
+    WITH chan_signals AS (
+      SELECT
+        s.signal_id,
+        s.from_address,
+        s.created_at,
+        NULLIF((s.payload->>'confidence'), '')::double precision AS confidence
+      FROM signals s
+      WHERE s.channel_id = ${channelId}
+        AND s.created_at >= now() - (${days} || ' days')::interval
+    ),
+    sig_agg AS (
+      SELECT
+        COUNT(*)::int                              AS signal_count,
+        COUNT(DISTINCT from_address)::int          AS distinct_pushers,
+        AVG(confidence)::double precision          AS avg_conv,
+        MAX(created_at)::text                      AS last_signal_at
+      FROM chan_signals
+    ),
+    react_agg AS (
+      SELECT COUNT(DISTINCT r.signal_id)::int AS accepted_signals
+      FROM chan_signals s
+      JOIN reactions r ON r.signal_id = s.signal_id AND r.from_address = ${me}
+    ),
+    pos_agg AS (
+      SELECT
+        COUNT(*)::int                                                                       AS opens,
+        COUNT(*) FILTER (WHERE p.closed_at IS NOT NULL)::int                                AS closes,
+        COUNT(*) FILTER (WHERE p.closed_at IS NOT NULL AND p.exit_pnl_usd > 0)::int         AS wins,
+        COUNT(*) FILTER (WHERE p.closed_at IS NOT NULL AND p.exit_pnl_usd < 0)::int         AS losses,
+        COALESCE(SUM(p.exit_pnl_usd) FILTER (WHERE p.closed_at IS NOT NULL), 0)::double precision AS realized_pnl_usd
+      FROM positions p
+      WHERE p.address = ${me}
+        AND p.channel_id = ${channelId}
+        AND p.opened_at >= now() - (${days} || ' days')::interval
+    )
+    SELECT
+      sa.signal_count, sa.distinct_pushers, sa.avg_conv, sa.last_signal_at,
+      COALESCE(ra.accepted_signals, 0)            AS accepted_signals,
+      COALESCE(pa.opens, 0)                       AS opens,
+      COALESCE(pa.closes, 0)                      AS closes,
+      COALESCE(pa.wins, 0)                        AS wins,
+      COALESCE(pa.losses, 0)                      AS losses,
+      COALESCE(pa.realized_pnl_usd, 0)::double precision AS realized_pnl_usd
+    FROM sig_agg sa
+    LEFT JOIN react_agg ra ON true
+    LEFT JOIN pos_agg pa  ON true
+  `;
+  const stats = rows[0]!;
+
+  // Top pushers in this channel — separate query because GROUP BY on
+  // username doesn't compose cleanly with the single-row aggregate above.
+  const topPushers = await sql<{ address: string; username: string | null; count: number }[]>`
+    SELECT s.from_address AS address, i.username, COUNT(*)::int AS count
+    FROM signals s
+    LEFT JOIN identities i ON i.address = s.from_address
+    WHERE s.channel_id = ${channelId}
+      AND s.created_at >= now() - (${days} || ' days')::interval
+    GROUP BY s.from_address, i.username
+    ORDER BY count DESC
+    LIMIT 5
+  `;
+
+  // Recent signals in this channel (any sender). Same LATERAL pattern as
+  // /peers/:address/stats to pick at most one reaction-from-me per signal.
+  const recent = await sql<{
+    signal_id: string;
+    from_address: string;
+    from_username: string | null;
+    payload: any;
+    created_at: string;
+    my_reaction_value: number | null;
+  }[]>`
+    SELECT
+      s.signal_id::text,
+      s.from_address,
+      i.username                                      AS from_username,
+      s.payload,
+      s.created_at::text,
+      NULLIF((latest_react.payload->>'value'), '')::int AS my_reaction_value
+    FROM signals s
+    LEFT JOIN identities i ON i.address = s.from_address
+    LEFT JOIN LATERAL (
+      SELECT payload
+      FROM reactions
+      WHERE signal_id = s.signal_id AND from_address = ${me}
+      ORDER BY created_at DESC
+      LIMIT 1
+    ) latest_react ON true
+    WHERE s.channel_id = ${channelId}
+      AND s.created_at >= now() - (${days} || ' days')::interval
+    ORDER BY s.created_at DESC
+    LIMIT 20
+  `;
+
+  const win_rate = (stats.wins + stats.losses) > 0
+    ? stats.wins / (stats.wins + stats.losses)
+    : null;
+  const accept_rate = stats.signal_count > 0
+    ? Math.min(1, stats.accepted_signals / stats.signal_count)
+    : null;
+
+  return c.json({
+    channel_id: channelId,
+    days,
+    stats: {
+      signal_count: stats.signal_count,
+      distinct_pushers: stats.distinct_pushers,
+      avg_conv: stats.avg_conv,
+      last_signal_at: stats.last_signal_at,
+      accepted_signals: stats.accepted_signals,
+      accept_rate,
+      opens: stats.opens,
+      closes: stats.closes,
+      wins: stats.wins,
+      losses: stats.losses,
+      win_rate,
+      realized_pnl_usd: stats.realized_pnl_usd,
+    },
+    top_pushers: topPushers,
+    recent_signals: recent,
+  });
+});
+
 // ─── POST /channels/:id/invite (group only) ────────────────────────────────
 channelRoutes.post("/channels/:id/invite", async (c) => {
   let me: string;

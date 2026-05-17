@@ -637,6 +637,8 @@ const dict: Record<Lang, Record<string, string>> = {
     "v2.friends.channel.empty": "No members.",
     "v2.friends.channel.ownerTag": "owner",
     "v2.friends.channel.joinedAt": "joined {ago}",
+    "v2.friends.channel.pushers": "{n} pushers",
+    "v2.friends.channel.recentSignals": "Recent signals in {name}",
 
     // Mode filter pill (Overview / Book hero)
     "v2.modePill.aria": "Book mode filter",
@@ -1299,6 +1301,8 @@ const dict: Record<Lang, Record<string, string>> = {
     "v2.friends.channel.empty": "暂无成员。",
     "v2.friends.channel.ownerTag": "群主",
     "v2.friends.channel.joinedAt": "加入于 {ago}",
+    "v2.friends.channel.pushers": "{n} 个推送者",
+    "v2.friends.channel.recentSignals": "{name} 最近的信号",
 
     // Mode filter pill
     "v2.modePill.aria": "交易簿模式过滤",

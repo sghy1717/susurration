@@ -726,6 +726,42 @@ export function useChannelDetail(channelId: string | null) {
   );
 }
 
+export interface ChannelStatsResponse {
+  channel_id: string;
+  days: number;
+  stats: {
+    signal_count: number;
+    distinct_pushers: number;
+    avg_conv: number | null;
+    last_signal_at: string | null;
+    accepted_signals: number;
+    accept_rate: number | null;
+    opens: number;
+    closes: number;
+    wins: number;
+    losses: number;
+    win_rate: number | null;
+    realized_pnl_usd: number;
+  };
+  top_pushers: { address: string; username: string | null; count: number }[];
+  recent_signals: {
+    signal_id: string;
+    from_address: string;
+    from_username: string | null;
+    payload: any;
+    created_at: string;
+    my_reaction_value: number | null;
+  }[];
+}
+
+export function useChannelStats(channelId: string | null, days: number = 30) {
+  return usePoll<ChannelStatsResponse>(
+    channelId ? `/channels/${encodeURIComponent(channelId)}/stats?days=${days}` : null,
+    30_000,
+    channelId != null,
+  );
+}
+
 export function useSignalFeed(limit: number = 200) {
   return usePoll<{ signals: FeedItem[]; count: number; limit: number }>(
     `/signals/feed?limit=${limit}`,

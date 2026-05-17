@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { Shell } from "./Shell";
 import {
   useFriends, usePendingRequests, useChannelGroups, usePeerDetail,
-  useChannelDetail, useChannelMembers,
+  useChannelDetail, useChannelMembers, useChannelStats,
   formatPnl, formatPercent,
   type Friend, type PendingRequest, type ChannelGroup,
 } from "./hooks";
@@ -437,6 +437,7 @@ function ChannelDetailPanel({ channelId }: { channelId: string }) {
   const { t } = useLang();
   const { data: detail, loading: detailLoading, error: detailError } = useChannelDetail(channelId);
   const { data: membersResp, loading: membersLoading, error: membersError } = useChannelMembers(channelId);
+  const { data: statsResp } = useChannelStats(channelId);
 
   // Two independent fetches. Don't gate the whole panel on the slower of
   // the two — show the channel shell as soon as `detail` is available,
@@ -477,9 +478,74 @@ function ChannelDetailPanel({ channelId }: { channelId: string }) {
             {" · "}
             {t("v2.friends.channel.createdAt", { ago: formatRelative(detail.created_at) })}
             {detail.is_group ? `${" · "}${t("v2.friends.channel.owner", { handle: ownerLabel })}` : ""}
+            {statsResp?.stats.last_signal_at
+              ? t("v2.friends.detail.lastSignal", { ago: formatRelative(statsResp.stats.last_signal_at) })
+              : ""}
           </div>
         </div>
       </div>
+
+      {/* Stats — same 4-cell stat grid as the peer panel, scoped to this
+          channel. Lets the user evaluate whether the room is worth
+          staying in (signal density + accept rate + my realized PnL +
+          win rate on positions I opened from this channel). */}
+      {statsResp && (
+        <div className="susu-stat-grid-4" style={{
+          border: "1px solid var(--susu-hairline)",
+          borderRadius: "var(--susu-r-lg)",
+          overflow: "hidden",
+          marginBottom: "var(--susu-s-5)",
+        }}>
+          <StatCell
+            label={t("v2.friends.detail.signalsLabel", { n: statsResp.days })}
+            value={statsResp.stats.signal_count}
+            meta={statsResp.stats.distinct_pushers > 0
+              ? t("v2.friends.channel.pushers", { n: statsResp.stats.distinct_pushers })
+              : "—"}
+          />
+          <StatCell
+            label={t("v2.friends.detail.acceptLabel")}
+            value={statsResp.stats.accept_rate != null ? `${Math.round(statsResp.stats.accept_rate * 100)}%` : "—"}
+            meta={`${statsResp.stats.accepted_signals} / ${statsResp.stats.signal_count}`}
+          />
+          <StatCell
+            label={t("v2.friends.detail.realised")}
+            value={<span style={{ color: statsResp.stats.realized_pnl_usd >= 0 ? "var(--susu-pos)" : "var(--susu-neg)" }}>{formatPnl(statsResp.stats.realized_pnl_usd)}</span>}
+            meta={t("v2.friends.detail.closes", { n: statsResp.stats.closes })}
+          />
+          <StatCell
+            label={t("v2.friends.detail.winRate")}
+            value={statsResp.stats.win_rate != null ? `${Math.round(statsResp.stats.win_rate * 100)}%` : "—"}
+            meta={t("v2.friends.detail.wl", { w: statsResp.stats.wins, l: statsResp.stats.losses })}
+            last
+          />
+        </div>
+      )}
+
+      {/* Recent signals — channel-scoped feed slice. Tag prefix shows the
+          sender so users can tell which member is producing the signal
+          (vs the peer panel where every row is by definition the same
+          person). my_reaction_value column reuses the same +1/-1/— glyph. */}
+      {statsResp && (
+        <div style={{ marginBottom: "var(--susu-s-5)" }}>
+          <div style={{
+            display: "flex", justifyContent: "space-between", alignItems: "baseline",
+            marginBottom: "var(--susu-s-3)",
+          }}>
+            <div style={{ fontSize: 14, fontWeight: 500 }}>{t("v2.friends.channel.recentSignals", { name })}</div>
+            <div style={{ fontFamily: "var(--susu-mono)", fontSize: 11, color: "var(--susu-ink-subtle)" }}>
+              {t("v2.friends.detail.recentAux", { n: statsResp.recent_signals.length, d: statsResp.days })}
+            </div>
+          </div>
+          <div style={{ border: "1px solid var(--susu-hairline)", borderRadius: "var(--susu-r-md)", overflow: "hidden" }}>
+            {statsResp.recent_signals.length === 0 ? (
+              <div className="susu-empty">{t("v2.friends.detail.recentEmpty")}</div>
+            ) : statsResp.recent_signals.map(sig => (
+              <ChannelSignalRow key={sig.signal_id} sig={sig} />
+            ))}
+          </div>
+        </div>
+      )}
 
       <div>
         <div style={{
@@ -548,6 +614,39 @@ function StatCell({ label, value, meta, last }: { label: string; value: React.Re
           {meta}
         </div>
       )}
+    </div>
+  );
+}
+
+// Channel-scoped variant of SignalRow: every signal in this channel can
+// come from a different sender, so we surface the handle inline (peer
+// panel doesn't because all rows share the same author).
+function ChannelSignalRow({ sig }: { sig: any }) {
+  const side = sig.payload?.side ?? sig.payload?.direction ?? "?";
+  const token = sig.payload?.token ?? sig.payload?.asset ?? sig.payload?.symbol ?? "?";
+  const entry = sig.payload?.entry ?? sig.payload?.entry_price ?? sig.payload?.price;
+  const note = sig.payload?.note ?? sig.payload?.reason;
+  const handle = sig.from_username ? `@${sig.from_username}` : `${sig.from_address.slice(0, 6)}…`;
+  return (
+    <div style={{
+      display: "grid", gridTemplateColumns: "auto auto auto auto 1fr auto", gap: "var(--susu-s-3)",
+      padding: "var(--susu-s-3) var(--susu-s-4)",
+      borderBottom: "1px solid var(--susu-hairline)",
+      fontFamily: "var(--susu-mono)", fontSize: 12,
+      alignItems: "center",
+    }}>
+      <span style={{ color: "var(--susu-ink-subtle)" }}>{formatRelative(sig.created_at)}</span>
+      <span style={{ color: "var(--susu-accent)" }}>{handle}</span>
+      <span className="susu-mono" style={{ color: "var(--susu-ink)" }}>{token}</span>
+      <Tag kind={side === "short" ? "short" : "long"}>{String(side).toUpperCase()}</Tag>
+      <span style={{ color: "var(--susu-ink-subtle)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+        {entry != null ? `entry ${entry}` : ""}{note ? `  ·  ${note}` : ""}
+      </span>
+      <span style={{
+        color: sig.my_reaction_value === 1 ? "var(--susu-pos)" : sig.my_reaction_value === -1 ? "var(--susu-neg)" : "var(--susu-ink-faint)",
+      }}>
+        {sig.my_reaction_value === 1 ? "+1" : sig.my_reaction_value === -1 ? "-1" : "—"}
+      </span>
     </div>
   );
 }
