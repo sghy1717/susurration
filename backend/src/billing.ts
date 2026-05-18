@@ -43,7 +43,7 @@ export async function meter(args: MeterArgs): Promise<{ cost_usd: number; usage_
 
   if (cost > 0) {
     // Try free credits first (atomic DB deduct, no on-chain call).
-    const credited = await args.tx<{ free_credits_usd: string }[]>`
+    const credited = await args.tx<{ free_credits_usd: number }[]>`
       UPDATE identities
       SET free_credits_usd = free_credits_usd - ${cost}
       WHERE address = ${args.address}

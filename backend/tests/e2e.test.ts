@@ -865,4 +865,45 @@ describeE2E("Susurration E2E (D7+D13)", () => {
     // address_hash must be 24-char hex (per lib/events.ts).
     for (const r of rows) expect(r.address_hash).toMatch(/^[0-9a-f]{24}$/);
   });
+
+  // ── NUMERIC driver parser (2026-05-19) ─────────────────────────────────
+  // Regression test for the /v2/daemon white-screen incident: postgres.js
+  // default parser only covers int/float OIDs (700/701), NUMERIC (1700)
+  // returns as string. db.ts registers a custom parser so NUMERIC columns
+  // come back as JS number; frontend DaemonPage.tsx:169 d.cost_usd.toFixed
+  // depends on this. If anyone removes the parser or upgrades the driver
+  // and the default changes, this test catches the regression before users
+  // see a white screen.
+  describe("NUMERIC columns parsed as JS number (driver config)", () => {
+    test("daemon_decisions.cost_usd round-trips as number, not string", async () => {
+      await sqlMod.sql`DELETE FROM daemon_decisions WHERE address = 'numeric-test-addr'`;
+      await sqlMod.sql`
+        INSERT INTO daemon_decisions(address, kind, cost_usd)
+        VALUES ('numeric-test-addr', 'noop', 0.00420042)
+      `;
+      const rows = await sqlMod.sql<{ cost_usd: unknown }[]>`
+        SELECT cost_usd FROM daemon_decisions WHERE address = 'numeric-test-addr'
+      `;
+      expect(rows).toHaveLength(1);
+      expect(typeof rows[0]!.cost_usd).toBe("number");
+      expect(rows[0]!.cost_usd).toBeCloseTo(0.00420042, 8);
+      await sqlMod.sql`DELETE FROM daemon_decisions WHERE address = 'numeric-test-addr'`;
+    });
+
+    test("identities.free_credits_usd round-trips as number", async () => {
+      // identities is TRUNCATE'd in beforeAll. Insert a minimal row.
+      await sqlMod.sql`
+        INSERT INTO identities(address, free_credits_usd)
+        VALUES ('numeric-test-id', 5.12345678)
+        ON CONFLICT (address) DO UPDATE SET free_credits_usd = EXCLUDED.free_credits_usd
+      `;
+      const rows = await sqlMod.sql<{ free_credits_usd: unknown }[]>`
+        SELECT free_credits_usd FROM identities WHERE address = 'numeric-test-id'
+      `;
+      expect(rows).toHaveLength(1);
+      expect(typeof rows[0]!.free_credits_usd).toBe("number");
+      expect(rows[0]!.free_credits_usd).toBeCloseTo(5.12345678, 8);
+      await sqlMod.sql`DELETE FROM identities WHERE address = 'numeric-test-id'`;
+    });
+  });
 });

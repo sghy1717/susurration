@@ -46,11 +46,12 @@ export async function buildAllowanceResponse(address: string): Promise<{
   const usdcMint = config.usdcMint;
   const approveUrl = `https://susurration.xyz/approve?amount=100`;
 
-  // Read free credits from DB.
-  const creditRows = await sql<{ free_credits_usd: string }[]>`
+  // Read free credits from DB. NUMERIC columns return as JS number via the
+  // postgres.js parser registered in db.ts.
+  const creditRows = await sql<{ free_credits_usd: number }[]>`
     SELECT free_credits_usd FROM identities WHERE address = ${address}
   `;
-  const freeCredits = Number(creditRows[0]?.free_credits_usd ?? 0);
+  const freeCredits = creditRows[0]?.free_credits_usd ?? 0;
   const freeCallsRemaining = rate > 0 ? Math.floor(freeCredits / rate) : 0;
 
   if (rate === 0) {
