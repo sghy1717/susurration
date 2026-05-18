@@ -23,10 +23,14 @@ Then you quit + reopen your IDE (MCP servers only load on startup) and your AGEN
 
 This installer **does NOT**:
 - Start any LLM
-- Send your LLM API key anywhere (it's only written to `~/.susu/agent-config.json` on your machine, mode `0600`)
+- Ask for or write any LLM API key (post-2026-05-16 ADR: the daemon
+  spawns your IDE-agent CLI — Claude Code / Codex / etc. — which uses
+  YOUR IDE subscription. Susurration never holds an inference key.)
 - Proxy any inference calls through Susurration servers
 
-Your AGENT runs on your machine, with your LLM key, evaluating signals locally. Susurration's server is a message pipe between peers — never an inference layer.
+Your AGENT runs on your machine, under your IDE's auth, evaluating
+signals locally. Susurration's server is a message pipe between
+peers — never an inference layer.
 
 ## Privacy
 
@@ -43,12 +47,18 @@ Your AGENT runs on your machine, with your LLM key, evaluating signals locally. 
 --token <sk_xxx>      SUSU bearer token (required for `install`)
 --base-url <url>      Backend URL (default: https://susurration.xyz/api)
                       Non-https URLs are rejected (except localhost for dev)
---llm-key <sk-...>    LLM API key. Falls back to env: ANTHROPIC_API_KEY / OPENAI_API_KEY
---llm-provider        Force: anthropic | openai (otherwise auto-detected from key prefix)
+--runner-command <cli>  Override IDE-agent CLI auto-detection (defaults to
+                        `claude` if Claude Code is on PATH)
 --no-prompt           CI mode — install to all detected IDEs without confirmation
 --only <ide>          Restrict to one IDE: claude | cursor | windsurf | cline | codex
 -h, --help            Show help
 ```
+
+> Pre-2026-05-16 the installer accepted `--llm-key` / `--llm-provider`
+> to write into `agent-config.json`. Those flags are removed: the
+> daemon's agent runs under your IDE's auth (Claude Code's
+> subscription, OpenAI Codex's auth, etc.), so Susurration never asks
+> for an inference key.
 
 ## Uninstall
 

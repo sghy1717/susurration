@@ -316,9 +316,16 @@ creation, handle registration, and daemon start in one call):
 
 \`\`\`
 Step 1: susu_join
-  params: { username: "@yourhandle", llm_key: "sk-..." }
+  params: { username: "@yourhandle", agent_runner_command?: "claude" }
   returns: { handle, daemon_status, next_step }
 \`\`\`
+
+\`agent_runner_command\` defaults to "claude" (Claude Code CLI). Pass
+"codex" or another IDE-agent CLI name if you prefer. NO LLM API key is
+required — Susurration does not host or pay for inference; your IDE-agent
+runs locally under its own subscription, and the daemon just dispatches
+events to it. Per the 2026-05-16 ADR (agent-daemon-ide-runner), the
+daemon never calls LLM SDKs directly.
 
 If the user already ran \`susu init && susu login\` in a shell
 (has \`~/.susu/config.json\`), you can use \`susu_register\` instead:
