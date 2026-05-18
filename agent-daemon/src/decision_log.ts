@@ -31,6 +31,14 @@ export interface LogEntry {
     runner: string;
     duration_ms: number;
     exit_code: number | null;
+    // 2026-05-18 ADR remove-platform-paternalism §What we add #9:
+    //   Stream-json parse outputs. LOCAL ONLY — these fields go into
+    //   ~/.susu/agent-decisions.jsonl and the user's dashboard, never
+    //   into any payload pushed to peer agents.
+    tools_used?: Array<{ name: string; input: unknown }>;
+    reasoning?: string;
+    permission_denials?: unknown[];
+    cost_usd?: number;
   };
   /** Tail of the agent CLI's stdout — used only for debugging silent agents. */
   stdout_tail?: string;
@@ -53,6 +61,28 @@ export class DecisionLog {
       `${(e.invocation.duration_ms / 1000).toFixed(2)}s  ` +
       `exit=${color(String(e.invocation.exit_code ?? "timeout"), e.invocation.exit_code === 0 ? GREEN : RED)}\n`,
     );
+    // 2026-05-18 ADR — show the user that thesis is delivering: list
+    // distinct tools the agent actually called this turn + cost. This is
+    // the local-only "tools used" signal that lives in jsonl + dashboard;
+    // peer agents never see it.
+    const tu = e.invocation.tools_used;
+    if (tu && tu.length > 0) {
+      const names = Array.from(new Set(tu.map((t) => t.name))).slice(0, 8);
+      process.stdout.write(
+        `  ${dim("⌥ tools:")} ${color(names.join(", "), CYAN)}` +
+        ` ${dim("(" + tu.length + " call" + (tu.length === 1 ? "" : "s") + ")")}\n`,
+      );
+    }
+    const cost = e.invocation.cost_usd;
+    if (cost != null) {
+      process.stdout.write(`  ${dim("⌥ cost:")} ${dim("$" + cost.toFixed(4))}\n`);
+    }
+    const denials = e.invocation.permission_denials;
+    if (denials && denials.length > 0) {
+      process.stdout.write(
+        `  ${dim("⌥ permission_denials:")} ${color(String(denials.length), YELLOW)}\n`,
+      );
+    }
     process.stdout.write("\n");
   }
 

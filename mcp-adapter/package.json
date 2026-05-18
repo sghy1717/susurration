@@ -1,6 +1,6 @@
 {
   "name": "@susurration/mcp",
-  "version": "0.0.29",
+  "version": "0.0.30",
   "description": "MCP server bridging Claude Code / Cursor / OpenClaw to Susurration",
   "type": "module",
   "bin": {

@@ -9,6 +9,7 @@ import {
   useBookSnapshot, useBookEquity, useOpenPositions, useDaemonState,
   useDaemonUpgrade,
   usePeersStats, useChannelGroups, useSignalFeed, usePrices,
+  useRecentDecisions,
   pnlOf, durationStr, formatMoney, formatPnl, formatPercent,
   type Position, type ModeFilter,
 } from "./hooks";
@@ -70,6 +71,12 @@ function OverviewBody() {
 
   return (
     <>
+      {/* 2026-05-18 ADR §What we add #10b — Onboarding tour. The first
+          time a user installs Susurration, they want to see the link
+          light up step by step. We dismiss the strip once all 5 steps
+          have been hit at least once; from then on the dashboard goes
+          straight to the hero. The "wow moment" is steps 4-5 firing. */}
+      <OnboardingTour />
       <div className="susu-page-hero">
         <div>
           <Eyebrow>{t("v2.ov.eyebrow")}</Eyebrow>
@@ -160,11 +167,17 @@ function OverviewBody() {
                 <table className="susu-table" style={{ fontVariantNumeric: "tabular-nums" }}>
                   <thead>
                     <tr>
+                      {/* 2026-05-18 Haze ask — mode chip was a full pill in
+                          its own column (too visually loud, "PAPER" green
+                          block dominated the row scan). Moved into the
+                          asset cell as a small superscript tag, freeing up
+                          column space for the new "size" column (position
+                          dollar amount, asked by Haze in same iteration). */}
                       <th>{t("v2.ov.table.asset")}</th>
-                      <th>{t("v2.ov.table.mode")}</th>
                       <th>{t("v2.ov.table.side")}</th>
                       <th>{t("v2.ov.table.from")}</th>
                       <th>{t("v2.ov.table.slMarkTp")}</th>
+                      <th>{t("v2.ov.table.size")}</th>
                       <th>{t("v2.ov.table.pnl")}</th>
                       <th>{t("v2.ov.table.duration")}</th>
                     </tr>
@@ -300,10 +313,33 @@ function PositionRow({ p, mark, now }: { p: Position; mark: number | null; now: 
   // by dirSign again in the color check, which flipped the colour on
   // every short. Drop the extra factor: green when pnl is genuinely
   // positive, red when negative.
+  // 2026-05-18 — mode tag rendered inline next to the asset symbol as a
+  // superscript-style chip instead of a full pill column. Same color
+  // semantics as ModeBadge (green=paper, amber=live) but ~1/3 the visual
+  // weight so the table row scans clean.
+  const isLive = (p.mode ?? "paper") === "live";
   return (
     <tr>
-      <td><strong className="susu-mono" style={{ color: "var(--susu-ink)" }}>{p.token}</strong></td>
-      <td><ModeBadge mode={p.mode ?? "paper"} /></td>
+      <td>
+        <span style={{ display: "inline-flex", alignItems: "baseline", gap: 4 }}>
+          <strong className="susu-mono" style={{ color: "var(--susu-ink)" }}>{p.token}</strong>
+          <span
+            style={{
+              fontSize: 8,
+              fontFamily: "var(--susu-mono)",
+              fontWeight: 600,
+              letterSpacing: "0.08em",
+              textTransform: "uppercase",
+              color: isLive ? "var(--susu-warn)" : "var(--susu-pos)",
+              opacity: 0.7,
+              lineHeight: 1,
+            }}
+            title={isLive ? "Live (real broker trade)" : "Paper (simulator)"}
+          >
+            {isLive ? "live" : "paper"}
+          </span>
+        </span>
+      </td>
       <td><Tag kind={p.direction === "long" ? "long" : "short"}>{p.direction.toUpperCase()} · {p.leverage}x</Tag></td>
       <td>
         <div style={{ display: "flex", alignItems: "center", gap: "var(--susu-s-2)" }}>
@@ -326,6 +362,15 @@ function PositionRow({ p, mark, now }: { p: Position; mark: number | null; now: 
       <td style={{
         fontFamily: "var(--susu-mono)",
         fontVariantNumeric: "tabular-nums",
+        color: "var(--susu-ink-muted)",
+      }}>
+        {p.position_usd != null
+          ? `$${Number(p.position_usd).toLocaleString("en-US", { maximumFractionDigits: 0 })}`
+          : "—"}
+      </td>
+      <td style={{
+        fontFamily: "var(--susu-mono)",
+        fontVariantNumeric: "tabular-nums",
         color: pnl == null ? "var(--susu-ink-subtle)" : pnl >= 0 ? "var(--susu-pos)" : "var(--susu-neg)",
       }}>
         {pnl == null ? "—" : (
@@ -339,12 +384,102 @@ function PositionRow({ p, mark, now }: { p: Position; mark: number | null; now: 
   );
 }
 
+// 2026-05-18 ADR §What we add #10b — first-run progress strip.
+// Each step lights up the first time its data source reports presence,
+// and stays lit. When all 5 are lit the strip self-dismisses (LocalStorage
+// remembers so a stale daemon never makes the strip reappear). Steps 4
+// and 5 are the thesis pay-off: agent actually dispatched + paper trade
+// happened, end-to-end.
+function OnboardingTour() {
+  const { data: daemon } = useDaemonState();
+  const { data: channels } = useChannelGroups();
+  const { data: feed } = useSignalFeed(50);
+  const { data: decisionsResp } = useRecentDecisions(10);
+  const { data: snapshot } = useBookSnapshot("all");
+  const { data: positionsResp } = useOpenPositions("all");
+
+  const step1 = daemon?.status === "online";
+  const step2 = (channels?.groups?.length ?? 0) > 0
+    || (feed?.signals?.some(s => (s as any).peer?.username === "demo") ?? false);
+  const step3 = (feed?.signals?.length ?? 0) > 0;
+  const step4 = (decisionsResp?.decisions?.length ?? 0) > 0;
+  const step5 = ((snapshot?.closed_count ?? 0) > 0)
+    || ((positionsResp?.positions?.length ?? 0) > 0);
+
+  const steps: Array<{ label: string; on: boolean; hint?: string }> = [
+    { label: "daemon running", on: step1 },
+    { label: "@demo connected", on: step2 },
+    { label: "first signal received", on: step3, hint: "(avg ~5 min after install)" },
+    { label: "first agent decision", on: step4 },
+    { label: "first paper trade", on: step5 },
+  ];
+
+  const allDone = steps.every(s => s.on);
+  const [dismissed, setDismissed] = useState(() => {
+    try { return localStorage.getItem("susu.onboarding.dismissed") === "1"; } catch { return false; }
+  });
+  useEffect(() => {
+    if (allDone && !dismissed) {
+      try { localStorage.setItem("susu.onboarding.dismissed", "1"); } catch { /* ignore */ }
+    }
+  }, [allDone, dismissed]);
+  if (dismissed || allDone) return null;
+
+  return (
+    <div className="susu-panel" style={{
+      padding: "var(--susu-s-3) var(--susu-s-4)",
+      marginBottom: "var(--susu-s-5)",
+      display: "flex", alignItems: "center", gap: "var(--susu-s-3)",
+      flexWrap: "wrap",
+      fontFamily: "var(--susu-mono)", fontSize: 11,
+    }}>
+      <span style={{ color: "var(--susu-ink-subtle)", marginRight: "var(--susu-s-2)" }}>
+        getting started ·
+      </span>
+      {steps.map((s, i) => (
+        <span key={i} style={{
+          display: "inline-flex", alignItems: "center", gap: 6,
+          color: s.on ? "var(--susu-pos, var(--susu-ink))" : "var(--susu-ink-subtle)",
+        }}>
+          <span style={{
+            width: 10, height: 10, borderRadius: "50%",
+            background: s.on ? "var(--susu-pos, var(--susu-ink))" : "transparent",
+            border: s.on ? "none" : "1px solid var(--susu-hairline)",
+          }} />
+          <span>{s.label}</span>
+          {!s.on && s.hint ? <span style={{ color: "var(--susu-ink-subtle)", marginLeft: 4 }}>{s.hint}</span> : null}
+        </span>
+      ))}
+      <button
+        className="susu-btn susu-btn-ghost susu-btn-sm"
+        onClick={() => { try { localStorage.setItem("susu.onboarding.dismissed", "1"); } catch { /* ignore */ } setDismissed(true); }}
+        style={{ marginLeft: "auto" }}
+      >
+        dismiss
+      </button>
+    </div>
+  );
+}
+
 function AgentStatePanel() {
   const { t } = useLang();
   const { data: daemon } = useDaemonState();
+  const { data: decisionsResp } = useRecentDecisions(5);
   const upgrade = useDaemonUpgrade();
   const now = useNow();
   if (!daemon) return null;
+
+  // 2026-05-18 ADR §What we add #10c — Health card "last successful
+  // run + tools used". Surface the most recent ok-exit decision and
+  // show distinct tool names. This is the persistent (post-onboarding)
+  // signal that thesis is delivering: agent is calling local capabilities.
+  const lastOk = decisionsResp?.decisions?.find(d =>
+    d.kind === "invoke" && d.context?.exit_code === "0"
+  );
+  const lastToolNames = lastOk?.tools_used
+    ? Array.from(new Set(lastOk.tools_used.map(t => t.name))).slice(0, 6)
+    : [];
+  const lastRunAgo = lastOk?.created_at ? durationStr(lastOk.created_at, now) : null;
 
   // Version cell renders the running version, and if a newer one is on
   // npm, marks the row with a yellow "upgrade available" hint so the
@@ -375,6 +510,16 @@ function AgentStatePanel() {
     [t("v2.ov.agent.conv"), daemon.conv_threshold != null ? daemon.conv_threshold.toFixed(2) : "—"],
     [t("v2.ov.agent.minSize"), daemon.min_size_factor != null ? daemon.min_size_factor.toFixed(2) : "—"],
     [t("v2.ov.agent.version"), versionCell],
+    // 2026-05-18 ADR §What we add #10c — health card rows. Show that
+    // the user's agent really called their local capabilities (Read /
+    // Skill / MCP). Persistent post-onboarding thesis signal.
+    ["last successful run",
+      lastRunAgo ? <span style={{ fontFamily: "var(--susu-mono)" }}>{lastRunAgo} ago</span>
+                 : <span style={{ color: "var(--susu-ink-subtle)" }}>—</span>],
+    ["tools called (last run)",
+      lastToolNames.length > 0
+        ? <span style={{ fontFamily: "var(--susu-mono)", fontSize: 11 }}>{lastToolNames.join(", ")}</span>
+        : <span style={{ color: "var(--susu-ink-subtle)" }}>—</span>],
   ];
 
   return (

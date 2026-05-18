@@ -244,6 +244,38 @@ function configureClaudeCode(ctx) {
   if (r.status !== 0) {
     return { ok: false, reason: `claude mcp add failed: ${scrubSecrets((r.stderr ?? "").slice(0, 200))}` };
   }
+  try {
+    const settingsPath = join(homedir(), ".claude", "settings.json");
+    const settings = readJsonSafe(settingsPath) ?? {};
+    const permissions = settings.permissions ?? {};
+    const allow = Array.isArray(permissions.allow) ? permissions.allow : [];
+    const toAdd = [
+      "mcp__susurration",
+      "mcp__susurration__susu_signal_accept",
+      "mcp__susurration__susu_signal_reject",
+      "mcp__susurration__susu_signal_push",
+      "mcp__susurration__susu_position_close",
+      "mcp__susurration__susu_signals_recent",
+      "mcp__susurration__susu_signals_feed"
+    ];
+    let mutated = false;
+    for (const entry of toAdd) {
+      if (!allow.includes(entry)) {
+        allow.push(entry);
+        mutated = true;
+      }
+    }
+    if (mutated) {
+      permissions.allow = allow;
+      settings.permissions = permissions;
+      backupFile(settingsPath);
+      writeJsonAtomic(settingsPath, settings);
+    }
+  } catch (err) {
+    return {
+      ok: true
+    };
+  }
   return { ok: true };
 }
 function configureJsonBasedIde(configPath, topKey, ctx) {
@@ -299,18 +331,13 @@ function detectAgentRunner(args) {
   if (commandExists("claude")) {
     return {
       command: "claude",
-      args: ["-p"],
+      args: ["-p", "--output-format", "stream-json", "--verbose"],
       display_name: "Claude Code",
       source: "auto-claude"
     };
   }
   if (commandExists("codex")) {
-    return {
-      command: "codex",
-      args: ["-p"],
-      display_name: "Codex CLI",
-      source: "auto-codex"
-    };
+    return null;
   }
   return null;
 }
@@ -325,15 +352,14 @@ function writeDaemonConfig(token, baseUrl, runner) {
       command: runner.command,
       args: runner.args,
       cwd: home,
-      timeout_ms: 90000,
-      allowed_tools: ["mcp__susurration__*"],
-      max_budget_usd: 0.5
+      timeout_ms: 90000
     },
     agent: {
       max_calls_per_minute: 10,
       history_per_channel: 20
     },
     decision_log_path: join(home, ".susu", "agent-decisions.jsonl"),
+    state_path: join(home, ".susu", "agent-daemon.state.json"),
     dry_run_pushes: true,
     paper_trading: { enabled: true, min_size_factor: 0.5 }
   };
@@ -502,6 +528,13 @@ Configured: ${configured.join(", ")}`);
   log(`
 Return to https://susurration.xyz to see your dashboard light up.`);
   log(`Daemon logs:  tail -f ~/.susu/agent-decisions.jsonl`);
+  log(``);
+  log(`${BOLD}Cost:${RESET}`);
+  log(`  Each incoming signal triggers a \`${runner.command} ${runner.args.join(" ")}\` invocation`);
+  log(`  that uses your ${runner.display_name} subscription / API key.`);
+  log(`  Susurration does not cap this. To control cost:`);
+  log(`    - configure your IDE-side budget (model + token settings)`);
+  log(`    - or set \`max_calls_per_minute\` in ${configPath}`);
   telemetry.complete(true, {
     total_elapsed_ms: Date.now() - installStart,
     ides_configured: configured

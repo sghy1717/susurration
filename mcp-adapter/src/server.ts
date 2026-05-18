@@ -38,7 +38,10 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 // Single source of truth — see code/shared/agent-doc.ts.
-import { AGENT_DOC, REFERENCE_SYSTEM_PROMPT } from "../../shared/agent-doc.ts";
+// 2026-05-18 P0 #2 — REFERENCE_SYSTEM_PROMPT used to be injected into
+// daemon config when MCP onboarded a user; post-Phase-18 the user's IDE
+// CLAUDE.md owns the system prompt and we don't write one. Import dropped.
+import { AGENT_DOC } from "../../shared/agent-doc.ts";
 
 interface SusuLocalConfig {
   api_url: string;
@@ -50,13 +53,19 @@ function loadConfig(): SusuLocalConfig {
   const path = process.env.SUSU_HOME
     ? join(process.env.SUSU_HOME, "config.json")
     : join(homedir(), ".susu", "config.json");
-  const apiUrl = process.env.SUSU_API_URL ?? "https://susurration.fly.dev/api";
+  // 2026-05-18 P1 #4 — installer writes SUSU_BASE_URL into the MCP env
+  // block (see installer/src/index.ts:274, 300). MCP adapter historically
+  // only read SUSU_API_URL, so a self-hosted / staging deployment would
+  // silently fall through to the production default. Read both, prefer
+  // SUSU_BASE_URL (newer, what installer ships).
+  const envUrl = process.env.SUSU_BASE_URL ?? process.env.SUSU_API_URL;
+  const apiUrl = envUrl ?? "https://susurration.fly.dev/api";
   const envToken = process.env.SUSU_TOKEN;
   try {
     const raw = readFileSync(path, "utf8");
     const parsed = JSON.parse(raw);
     return {
-      api_url: process.env.SUSU_API_URL ?? parsed.api_url ?? apiUrl,
+      api_url: envUrl ?? parsed.api_url ?? apiUrl,
       address: parsed.address,
       token: envToken ?? parsed.token,
     };
@@ -120,14 +129,14 @@ const TOOLS = [
   {
     name: "susu_join",
     description:
-      "One-step onboarding: register a permanent @handle, generate daemon config with the user's LLM key, and start the daemon. Equivalent to CLI `susu join @handle --llm-key KEY`. Ask the user for their handle and LLM API key before calling.",
+      "One-step onboarding: register a permanent @handle and generate daemon config that delegates decisions to your IDE-agent CLI (Claude Code by default; Codex / Cursor / etc. by setting agent_runner_command). The agent uses YOUR IDE subscription — Susurration does not require or accept an LLM API key. Ask the user for their handle before calling.",
     inputSchema: {
       type: "object",
       properties: {
         username: { type: "string", description: "@handle (5-20 chars, lowercase, permanent)" },
-        llm_key: { type: "string", description: "User's OpenAI (sk-proj-...) or Anthropic (sk-ant-...) API key" },
+        agent_runner_command: { type: "string", description: "IDE-agent CLI binary on PATH. Default \"claude\" (Claude Code). Pass \"codex\" or other CLI name to override." },
       },
-      required: ["username", "llm_key"],
+      required: ["username"],
       additionalProperties: false,
     },
   },
@@ -499,34 +508,44 @@ async function main() {
             }
           }
 
-          // Step 2: detect provider + generate daemon config
-          const llmKey = String(args.llm_key ?? "");
-          let provider = "openai";
-          let model = "gpt-4o";
-          if (llmKey.startsWith("sk-ant-")) {
-            provider = "anthropic";
-            model = "claude-sonnet-4-20250514";
-          }
-
+          // Step 2: generate daemon config matching installer-shipped shape.
+          // 2026-05-18 P0 #2 — pre-Phase-18 wrote `llm: {provider,api_key,model}`
+          // + `agent.system_prompt`, but daemon since 5/16 ADR requires
+          // `agent_runner: {command,args,...}` and refuses to start without
+          // it. This case used to break daemon onboarding via MCP entirely.
+          // Now we emit the same shape installer writes (no LLM key, no
+          // hardcoded system_prompt — IDE-agent owns both).
+          const runnerCommand = String(args.agent_runner_command ?? "claude");
           const { writeFileSync, mkdirSync } = await import("node:fs");
           const { join: pJoin } = await import("node:path");
           const { homedir: hdir } = await import("node:os");
           const susuDir = process.env.SUSU_HOME ?? pJoin(hdir(), ".susu");
           mkdirSync(susuDir, { recursive: true });
           const dcPath = pJoin(susuDir, "agent-config.json");
+          const home = hdir();
           const daemonCfg = {
             api_url: cfg.api_url,
             token: cfg.token,
-            llm: { provider, api_key: llmKey, model },
+            agent_runner: {
+              command: runnerCommand,
+              // claude headless mode requires --verbose alongside stream-json
+              // (see ADR `2026-05-18-remove-platform-paternalism` §What we
+              // add #9). Non-claude runners get plain `-p` and their own
+              // stream parsing is a future ADR.
+              args: runnerCommand === "claude"
+                ? ["-p", "--output-format", "stream-json", "--verbose"]
+                : ["-p"],
+              cwd: home,
+              timeout_ms: 90_000,
+            },
             agent: {
-              system_prompt: REFERENCE_SYSTEM_PROMPT,
               max_calls_per_minute: 10,
               history_per_channel: 20,
             },
             decision_log_path: pJoin(susuDir, "agent-decisions.jsonl"),
             state_path: pJoin(susuDir, "agent-daemon.state.json"),
             dry_run_pushes: true,
-            paper_trading: { enabled: true },
+            paper_trading: { enabled: true, min_size_factor: 0.5 },
           };
           writeFileSync(dcPath, JSON.stringify(daemonCfg, null, 2), { mode: 0o600 });
 

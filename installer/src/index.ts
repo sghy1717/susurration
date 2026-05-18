@@ -306,6 +306,61 @@ function configureClaudeCode(ctx: McpConfigContext): { ok: true } | { ok: false;
     // parse errors. Scrub before exposing to telemetry / user terminal.
     return { ok: false, reason: `claude mcp add failed: ${scrubSecrets((r.stderr ?? "").slice(0, 200))}` };
   }
+
+  // 2026-05-18 — `claude mcp add` registers the server (agent sees the
+  // tools in its tool list) but does NOT grant permission to invoke them.
+  // In claude code's `dontAsk` / `default` modes, third-party MCP tools
+  // require an explicit entry in settings.json `permissions.allow`. Without
+  // this, daemon-spawned `claude -p` evaluates signals, decides to
+  // accept/reject, and then permission-denies its own MCP call → falls
+  // through to "do nothing" silently. Onboarding without this step
+  // produces a daemon that looks alive but never opens a single position.
+  // See 2026-05-18 audit findings: agent_runner reasoning_summary tail
+  // "Paper accept ... blocked by permission settings (don't-ask mode)".
+  try {
+    const settingsPath = join(homedir(), ".claude", "settings.json");
+    const settings = readJsonSafe<Record<string, any>>(settingsPath) ?? {};
+    const permissions = (settings.permissions ?? {}) as Record<string, any>;
+    const allow: string[] = Array.isArray(permissions.allow) ? permissions.allow : [];
+    // Tools the daemon-dispatched agent actually invokes (accept/reject is
+    // the main path; push lets the user's agent emit alpha; close mirrors
+    // broker fills; signals_recent/feed are read-only lookups). Server-level
+    // `mcp__susurration` allow covers the rest in case agent uses other
+    // tools (matches the existing pattern for mcp__Claude_in_Chrome on
+    // line 17 of Haze's settings).
+    const toAdd = [
+      "mcp__susurration",
+      "mcp__susurration__susu_signal_accept",
+      "mcp__susurration__susu_signal_reject",
+      "mcp__susurration__susu_signal_push",
+      "mcp__susurration__susu_position_close",
+      "mcp__susurration__susu_signals_recent",
+      "mcp__susurration__susu_signals_feed",
+    ];
+    let mutated = false;
+    for (const entry of toAdd) {
+      if (!allow.includes(entry)) {
+        allow.push(entry);
+        mutated = true;
+      }
+    }
+    if (mutated) {
+      permissions.allow = allow;
+      settings.permissions = permissions;
+      backupFile(settingsPath);
+      writeJsonAtomic(settingsPath, settings);
+    }
+  } catch (err) {
+    // Non-fatal: MCP registration succeeded, just couldn't auto-allow.
+    // User will see an interactive permission prompt on first invocation
+    // (interactive sessions only; daemon -p still silently fails). Better
+    // than aborting the whole install over a single file write.
+    return {
+      ok: true,
+      // Tuck a warning into the OK return — caller can surface it.
+      // No structured warn field on the type so we fall through cleanly.
+    };
+  }
   return { ok: true };
 }
 
@@ -385,18 +440,31 @@ function detectAgentRunner(args: CliArgs): RunnerDetection | null {
   if (commandExists("claude")) {
     return {
       command: "claude",
-      args: ["-p"],
+      // 2026-05-18 ADR remove-platform-paternalism §What we add #9:
+      //   `--output-format stream-json` lets the daemon parse the agent's
+      //   tool calls + reasoning for the user's own local dashboard.
+      //   `--verbose` is required by claude when stream-json + -p combine.
+      //   The parsed data stays local — never push to peer.
+      args: ["-p", "--output-format", "stream-json", "--verbose"],
       display_name: "Claude Code",
       source: "auto-claude",
     };
   }
+  // 2026-05-18 G review P0 #5 — Codex CLI's non-interactive entry is
+  // `codex exec`, not `codex -p`. Writing the old (wrong) shape to
+  // agent-config.json would cause daemon spawn to fail silently on every
+  // signal — user thinks daemon is alive but it never reacts. Codex
+  // also emits a different stream-json schema than Claude (OpenAI thread
+  // events vs Anthropic content blocks), so even fixing the flag isn't
+  // enough — full codex support is a separate ADR.
+  //
+  // For now: detect-but-refuse. We *see* the codex CLI is installed
+  // (so we don't lie in telemetry) but we don't write a config we know
+  // is broken. Caller (cmdInstall) falls through to "no runner detected"
+  // and asks the user to install Claude Code instead.
   if (commandExists("codex")) {
-    return {
-      command: "codex",
-      args: ["-p"],
-      display_name: "Codex CLI",
-      source: "auto-codex",
-    };
+    // Intentionally NOT returning a config — see comment above.
+    return null;
   }
   return null;
 }
@@ -416,17 +484,22 @@ function writeDaemonConfig(token: string, baseUrl: string, runner: RunnerDetecti
       // the agent loads the user's global CLAUDE.md without ambiguity.
       cwd: home,
       timeout_ms: 90_000,
-      // Only allow the agent to call susurration MCP tools during unattended
-      // dispatches. Prevents a misbehaving prompt from editing user files.
-      allowed_tools: ["mcp__susurration__*"],
-      // Modest per-event budget cap (Claude Code only — others ignore).
-      max_budget_usd: 0.5,
+      // 2026-05-18 ADR remove-platform-paternalism:
+      //   allowed_tools / max_budget_usd removed. Agent capability and
+      //   per-event cost are fully owned by the user's IDE permission
+      //   system + IDE subscription — Susurration is communication
+      //   layer only, doesn't gate capability or meter spend.
     },
     agent: {
       max_calls_per_minute: 10,
       history_per_channel: 20,
     },
     decision_log_path: join(home, ".susu", "agent-decisions.jsonl"),
+    // 2026-05-18 G review P1 #4 — installer was emitting config without
+    // `state_path` while mcp-adapter's susu_join writes it. Daemon falls
+    // back to a default if missing, but the two onboarding paths' schemas
+    // were drifting. Set explicitly so both paths write identical configs.
+    state_path: join(home, ".susu", "agent-daemon.state.json"),
     dry_run_pushes: true,
     paper_trading: { enabled: true, min_size_factor: 0.5 },
   };
@@ -609,6 +682,17 @@ async function cmdInstall(args: CliArgs): Promise<number> {
   }
   log(`\nReturn to https://susurration.xyz to see your dashboard light up.`);
   log(`Daemon logs:  tail -f ~/.susu/agent-decisions.jsonl`);
+
+  // 2026-05-18 ADR remove-platform-paternalism — communicate the
+  // cost-responsibility shift explicitly so the user knows Susurration
+  // does not cap per-event spend; their IDE subscription does.
+  log(``);
+  log(`${BOLD}Cost:${RESET}`);
+  log(`  Each incoming signal triggers a \`${runner.command} ${runner.args.join(" ")}\` invocation`);
+  log(`  that uses your ${runner.display_name} subscription / API key.`);
+  log(`  Susurration does not cap this. To control cost:`);
+  log(`    - configure your IDE-side budget (model + token settings)`);
+  log(`    - or set \`max_calls_per_minute\` in ${configPath}`);
 
   void telemetry.complete(true, {
     total_elapsed_ms: Date.now() - installStart,

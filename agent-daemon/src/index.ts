@@ -66,12 +66,12 @@ interface DaemonConfig {
     cwd?: string;
     /** Timeout per event. Defaults to 90s. */
     timeout_ms?: number;
-    /** Restrict tools (forwarded as --allowed-tools to Claude Code). For
-     *  daemon mode we recommend "mcp__susurration__*" so the agent can
-     *  only touch the network, not the user's filesystem. */
-    allowed_tools?: string[];
-    /** Per-event budget cap. Forwarded as --max-budget-usd. */
-    max_budget_usd?: number;
+    // 2026-05-18 ADR remove-platform-paternalism: allowed_tools and
+    // max_budget_usd removed from the schema. Agent capability and
+    // per-event cost are owned by the user's IDE — Susurration doesn't
+    // gate capability or meter spend. Legacy fields in old configs are
+    // detected at startup and warned via deprecation banner; values are
+    // ignored.
   };
   agent: {
     /** Per-minute invocation cap. Protects the user's IDE subscription
@@ -113,8 +113,11 @@ interface DaemonConfig {
    *  500 chars, secrets redacted) to server's `daemon_decisions` table.
    *  Lets you see decision history on any device's dashboard.
    *  When FALSE, only react/push/noop metadata is shared (kind, signal_id,
-   *  latency); the LLM reasoning stays local in agent-decisions.jsonl.
-   *  Set to false if you want to keep your LLM reasoning fully local. */
+   *  latency, tools_used, cost_usd); the LLM reasoning stays local in
+   *  agent-decisions.jsonl.
+   *  Set to false if you want to keep your LLM reasoning fully local.
+   *  G review P0 #3 (2026-05-18): this flag was dead code from Phase 14
+   *  to 0.0.26 — declared but never read. 0.0.27 actually gates on it. */
   share_reasoning_summary?: boolean;
   /** Phase 17 — local HTTP server for one-click self-upgrade.
    *  Bound to 127.0.0.1:7777 by default. Disable by setting `{disabled:true}`
@@ -281,6 +284,31 @@ async function main(): Promise<number> {
   const cfg = await loadConfig(args);
   const susu: SusuClientConfig = { api_url: cfg.api_url, token: cfg.token };
 
+  // 2026-05-18 ADR remove-platform-paternalism: detect legacy fields and
+  // warn once. allowed_tools / max_budget_usd were "safety bottoms" added
+  // when Phase 18 ADR landed, with no ADR backing. They violate the
+  // thesis (Susurration is communication layer only; agent capability and
+  // per-event cost are owned by the user's IDE). We silently drop the
+  // values at runtime (see runnerCfg construction below) but tell the
+  // user once so they understand the responsibility shift.
+  const legacyAR = cfg.agent_runner as {
+    allowed_tools?: unknown;
+    max_budget_usd?: unknown;
+  };
+  if (legacyAR.allowed_tools != null || legacyAR.max_budget_usd != null) {
+    const fields: string[] = [];
+    if (legacyAR.allowed_tools != null) fields.push("agent_runner.allowed_tools");
+    if (legacyAR.max_budget_usd != null) fields.push("agent_runner.max_budget_usd");
+    process.stderr.write(
+      `\n⚠  Deprecated config fields detected in agent-config.json:\n` +
+      fields.map((f) => `     - ${f}\n`).join("") +
+      `   These are ignored as of v0.0.6 — agent capability is delegated\n` +
+      `   to your IDE's permission system (~/.claude/settings.json);\n` +
+      `   per-event cost is owned by your IDE subscription.\n` +
+      `   Run \`npx @susurration/installer\` to regenerate a clean config.\n\n`,
+    );
+  }
+
   // Phase 18 — instantiate IDE-agent runner. The user's IDE-agent CLI
   // (Claude Code / Codex / etc.) is the decider; daemon dispatches events
   // to it. Refuse to start if the configured CLI isn't on PATH — silent
@@ -297,8 +325,10 @@ async function main(): Promise<number> {
     args: cfg.agent_runner.args ?? [],
     cwd: cfg.agent_runner.cwd,
     timeout_ms: cfg.agent_runner.timeout_ms,
-    allowed_tools: cfg.agent_runner.allowed_tools,
-    max_budget_usd: cfg.agent_runner.max_budget_usd,
+    // 2026-05-18 ADR remove-platform-paternalism: allowed_tools and
+    // max_budget_usd are no longer threaded through. If the loaded config
+    // still has these legacy fields, the deprecation banner above warns
+    // the user; the values themselves are intentionally dropped here.
   };
   const runner = new IdeAgentRunner(runnerCfg);
 
@@ -636,36 +666,98 @@ async function runOneStream(
   paperTrader: PaperTrader | null,
   signal?: AbortSignal,
 ): Promise<void> {
-  const url = susu.api_url.replace(/\/$/, "") + "/signals/feed/stream";
-  // Phase 16 — User-Agent reports daemon version so backend can update
-  // identity.last_daemon_version for dashboard upgrade banner.
-  const resp = await fetch(url, {
-    headers: {
-      authorization: `Bearer ${susu.token}`,
-      "user-agent": `susurration-agent-daemon/${DAEMON_VERSION}`,
-    },
-    signal,
-  });
-  if (resp.status === 401 || resp.status === 403) {
-    throw new Error(`auth failed (HTTP ${resp.status}); your token may have expired — re-run \`susu login\` and update config`);
+  // 2026-05-18 daemon SSE zombie-state fix (0.0.26)
+  // ──────────────────────────────────────────────────────────────────
+  // Observed: after server-side 502 (common during fly deploy), daemon
+  // logged successful reconnect (`loaded N already-processed event IDs`)
+  // but then received zero live events for hours. The TCP connection
+  // looked open, the backfill replay ran, but the server-side push
+  // pipeline never re-wired to this new connection (root cause TBD —
+  // likely server-side listener registration race on rapid reconnect).
+  //
+  // Defensive fix: track time since the last received chunk (any chunk,
+  // including `event: ping` keepalives — backend emits one every ~30s).
+  // If nothing arrives within INACTIVITY_TIMEOUT_MS, the watchdog forces
+  // an abort on the fetch's AbortController, the read loop throws, and
+  // the outer reconnect loop in main() picks it up — no manual
+  // `launchctl kickstart` needed.
+  //
+  // Why 90s: server SSE handler emits `event: ping` every 5s (see
+  // `backend/src/routes/signals.ts` heartbeat setInterval). 90s is 18×
+  // that — covers brief Wi-Fi stalls / mobile sleep wake-ups without
+  // false-positive reconnects, but short enough that a real zombie
+  // doesn't quietly persist for hours (the user-visible failure mode
+  // this whole patch exists to fix). G review 2026-05-18 verified the
+  // 5s figure empirically; an earlier draft said "~30s" — that was S
+  // guessing, not reading the code.
+  const INACTIVITY_TIMEOUT_MS = 90_000;
+  const INACTIVITY_CHECK_MS = 15_000;
+
+  const inactivityCtl = new AbortController();
+  // Outer signal (SIGTERM / SIGINT) must still propagate so daemon can
+  // exit cleanly. Listen on the outer signal and forward abort into our
+  // inner controller. AbortSignal.any() would be cleaner but isn't
+  // available on all Bun targets we ship to.
+  // G review #2 — listener leak fix: long-running daemon reconnects 100s
+  // of times across its lifetime. Each old runOneStream invocation used
+  // to leave a `{ once: true }` listener on the outer signal closing over
+  // its (now-dead) inactivityCtl. The closure kept the controller alive
+  // and the listener stayed registered until the outer signal eventually
+  // fired (~never, for a healthy daemon). Cap accumulation by stashing
+  // a named handler and removing it in the finally block.
+  const onOuterAbort = () => inactivityCtl.abort();
+  if (signal) {
+    if (signal.aborted) inactivityCtl.abort();
+    else signal.addEventListener("abort", onOuterAbort, { once: true });
   }
-  if (resp.status === 429) {
-    throw new Error("too_many_streams (HTTP 429) — close other watch/feed sessions");
-  }
-  if (!resp.ok || !resp.body) throw new Error(`stream HTTP ${resp.status}`);
+  let lastChunkAt = Date.now();
+  const inactivityTimer = setInterval(() => {
+    const idleMs = Date.now() - lastChunkAt;
+    if (idleMs > INACTIVITY_TIMEOUT_MS && !inactivityCtl.signal.aborted) {
+      process.stderr.write(
+        `[daemon] stream: no data for ${(idleMs / 1000).toFixed(0)}s ` +
+        `(watchdog cutoff ${INACTIVITY_TIMEOUT_MS / 1000}s) — forcing reconnect\n`,
+      );
+      inactivityCtl.abort();
+    }
+  }, INACTIVITY_CHECK_MS);
 
-  // Dedup: load IDs already decided on from previous runs / reconnects.
-  const processed = loadAlreadyProcessedIds(cfg.decision_log_path);
-  process.stderr.write(`[daemon] stream: loaded ${processed.size} already-processed event IDs\n`);
+  try {
+    const url = susu.api_url.replace(/\/$/, "") + "/signals/feed/stream";
+    // Phase 16 — User-Agent reports daemon version so backend can update
+    // identity.last_daemon_version for dashboard upgrade banner.
+    const resp = await fetch(url, {
+      headers: {
+        authorization: `Bearer ${susu.token}`,
+        "user-agent": `susurration-agent-daemon/${DAEMON_VERSION}`,
+      },
+      signal: inactivityCtl.signal,
+    });
+    if (resp.status === 401 || resp.status === 403) {
+      throw new Error(`auth failed (HTTP ${resp.status}); your token may have expired — re-run \`susu login\` and update config`);
+    }
+    if (resp.status === 429) {
+      throw new Error("too_many_streams (HTTP 429) — close other watch/feed sessions");
+    }
+    if (!resp.ok || !resp.body) throw new Error(`stream HTTP ${resp.status}`);
 
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
+    // Dedup: load IDs already decided on from previous runs / reconnects.
+    const processed = loadAlreadyProcessedIds(cfg.decision_log_path);
+    process.stderr.write(`[daemon] stream: loaded ${processed.size} already-processed event IDs\n`);
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) return;
-    buf += decoder.decode(value, { stream: true });
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) return;
+      // Reset watchdog — any chunk counts (event, ping, partial frame).
+      // Doing this on raw chunk arrival (not parsed event boundary) means
+      // we don't false-positive when a single SSE frame is split across
+      // TCP packets.
+      lastChunkAt = Date.now();
+      buf += decoder.decode(value, { stream: true });
     const parts = buf.split(/\r?\n\r?\n/);
     buf = parts.pop() ?? "";
     for (const block of parts) {
@@ -715,6 +807,18 @@ async function runOneStream(
         process.stderr.write(`[daemon] handle error: ${(err as Error)?.message ?? err}\n`);
       });
     }
+    }
+  } finally {
+    // Always clear the watchdog — both on natural stream end (server
+    // closed cleanly) and on every error path (network blip, auth fail,
+    // inactivity-triggered abort). Without this, a long-running daemon
+    // would leak interval handles each reconnect cycle.
+    clearInterval(inactivityTimer);
+    // G review #2 — remove the outer-signal listener we attached at the
+    // top of this function. `{ once: true }` would auto-remove on fire,
+    // but in the common case (healthy daemon, no SIGTERM yet) the
+    // listener never fires and would otherwise stay attached forever.
+    if (signal) signal.removeEventListener("abort", onOuterAbort);
   }
 }
 
@@ -834,6 +938,11 @@ async function handleEvent(
       runner: cfg.agent_runner.command,
       duration_ms: runResult.duration_ms,
       exit_code: runResult.exit_code,
+      // 2026-05-18 ADR — stream-json parse outputs. LOCAL ONLY.
+      tools_used: runResult.tools_used,
+      reasoning: runResult.reasoning,
+      permission_denials: runResult.permission_denials,
+      cost_usd: runResult.cost_usd,
     },
     stdout_tail: runResult.stdout_tail.slice(-1000),
   });
@@ -853,6 +962,21 @@ async function handleEvent(
       runner: cfg.agent_runner.command,
       exit_code: String(runResult.exit_code),
     },
+    // 2026-05-18 ADR — stream-json parse outputs. Caller-bound, never
+    // pushed to peer channels (caller-only ACL on daemon_decisions table).
+    tools_used: runResult.tools_used,
+    permission_denials: runResult.permission_denials,
+    cost_usd: runResult.cost_usd,
+    // G review P0 #3 2026-05-18 — actually honor the share_reasoning_summary
+    // config field. Previously declared in DaemonConfig but never read; we
+    // unconditionally sent reasoning to the server, violating the comment's
+    // own promise that opt-out keeps reasoning local. Default remains TRUE
+    // (Phase 15 product decision — cross-device decision history is too
+    // useful to leave off by default); users who want their LLM reasoning
+    // to stay strictly in ~/.susu/agent-decisions.jsonl set this to false.
+    reasoning_summary: cfg.share_reasoning_summary !== false
+      ? runResult.reasoning?.slice(0, 500)
+      : undefined,
   });
 
   // Phase 18.2 — auto-open is server-atomic now. When the agent calls

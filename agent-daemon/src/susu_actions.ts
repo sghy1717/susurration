@@ -87,11 +87,9 @@ export async function recentSignals(
   return await resp.json() as ChannelHistory;
 }
 
-export async function whoami(cfg: SusuClientConfig): Promise<{ address: string; username: string | null; handle: string | null }> {
-  const resp = await authedFetch(cfg, `/me`);
-  if (!resp.ok) throw new Error(`whoami HTTP ${resp.status}: ${await resp.text()}`);
-  return await resp.json() as any;
-}
+// 2026-05-18 G review P1 #3 — whoami() pointed at /me which 404s
+// (real endpoint is /identity/whoami). Function had zero callers in
+// agent-daemon. Removed rather than fixed-and-kept-unused.
 
 export function reportClientError(
   cfg: SusuClientConfig,
@@ -137,6 +135,14 @@ export function reportDaemonDecision(
     llm_model?: string;
     reasoning_summary?: string;
     context?: Record<string, unknown>;
+    // 2026-05-18 ADR remove-platform-paternalism §What we add #9.
+    // Parsed from claude stream-json; LOCAL ONLY (caller-bound row, never
+    // pushed to peer channels). Persisted in daemon_decisions for the
+    // user's own dashboard / "tools used" reveal so thesis tangibly
+    // delivers.
+    tools_used?: Array<{ name: string; input: unknown }>;
+    permission_denials?: unknown[];
+    cost_usd?: number;
   },
 ): void {
   // Hashed analytics path (legacy)
@@ -151,7 +157,11 @@ export function reportDaemonDecision(
       context: { version: DAEMON_VERSION, ...(params.context ? redactSecretsDeep(params.context as Record<string, unknown>) : {}) },
     }),
   }).catch(() => {});
-  // Phase 11b — caller-bound plaintext for cross-device user-visible decision history
+  // Phase 11b — caller-bound plaintext for cross-device user-visible decision history.
+  // 2026-05-18 ADR remove-platform-paternalism §What we add #9: tools_used /
+  // permission_denials / cost_usd come from claude stream-json parse. They
+  // STAY caller-bound (this row is fetched only by the caller via
+  // /daemon_decisions/mine) — never copied into peer-facing payloads.
   void authedFetch(cfg, `/daemon_decisions`, {
     method: "POST",
     body: JSON.stringify({
@@ -164,7 +174,24 @@ export function reportDaemonDecision(
       ...(params.latency_ms != null ? { latency_ms: params.latency_ms } : {}),
       ...(params.llm_provider ? { llm_provider: params.llm_provider } : {}),
       ...(params.llm_model ? { llm_model: params.llm_model } : {}),
+      // Redact FIRST, slice SECOND — redaction can shorten a `sk-...XYZ`
+      // pattern into a 6-char `sk-***` token, which could free room
+      // earlier-trimmed content otherwise wouldn't have had. Server also
+      // applies a slice(500) defensively (daemon_decisions.ts), so either
+      // order would land at ≤500 chars on disk; this order keeps the slice
+      // window aligned with what the user actually sees post-redaction.
+      // (G review P1 #10, 2026-05-18 — explanation added; behavior unchanged.)
       ...(params.reasoning_summary ? { reasoning_summary: redactSecrets(params.reasoning_summary).slice(0, 500) } : {}),
+      // 2026-05-18 G review #2 — tools_used.input may carry shell commands
+      // / API URLs / file contents with embedded secrets (sk-..., Bearer
+      // tokens, broker API keys). caller-bound ACL on /daemon_decisions/mine
+      // limits READ but server-side DB / backups / dbadmin still see
+      // plaintext. Pass through redactSecretsDeep like reasoning_summary
+      // and reportClientError do. Same for permission_denials (denial
+      // metadata may quote the attempted command).
+      ...(params.tools_used && params.tools_used.length > 0 ? { tools_used: redactSecretsDeep(params.tools_used as unknown as Record<string, unknown>) } : {}),
+      ...(params.permission_denials && params.permission_denials.length > 0 ? { permission_denials: redactSecretsDeep(params.permission_denials as unknown as Record<string, unknown>) } : {}),
+      ...(params.cost_usd != null ? { cost_usd: params.cost_usd } : {}),
     }),
   }).catch(() => {});
 }

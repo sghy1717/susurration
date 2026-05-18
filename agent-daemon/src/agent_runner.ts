@@ -21,13 +21,11 @@ export interface AgentRunnerConfig {
   cwd?: string;
   /** How long to wait for the agent CLI to exit. Default 90s. */
   timeout_ms?: number;
-  /** Restrict the agent to susu_* tools so it can't go edit files / run
-   *  shells on user's machine during automated daemon invocations.
-   *  Forwarded as --allowed-tools (claude) when supported. */
-  allowed_tools?: string[];
-  /** Optional cost ceiling per event. Forwarded as --max-budget-usd when
-   *  the runner supports it. */
-  max_budget_usd?: number;
+  // 2026-05-18 ADR remove-platform-paternalism: allowed_tools and
+  // max_budget_usd removed. Agent capability is fully owned by the user's
+  // IDE permission system (~/.claude/settings.json); per-event cost is
+  // owned by the user's IDE subscription. Susurration is communication
+  // layer only — doesn't gate capability or meter spend.
 }
 
 export interface RunnerInvocation {
@@ -39,6 +37,21 @@ export interface RunnerInvocation {
   channel_label: string;
   /** Caller's own @handle so the agent doesn't react to its own pushes. */
   my_handle: string | null;
+}
+
+/** One tool call captured from the claude `--output-format stream-json` stream.
+ *  2026-05-18 ADR remove-platform-paternalism §What we add #9 — used for the
+ *  user's local dashboard to surface "agent called Read(Sbrain/...) +
+ *  mcp__gmgn-token__... + reasoned with Skill X" so thesis ("调用用户 agent
+ *  能力") is visible. STAYS LOCAL — never push to peer. */
+export interface ToolUse {
+  /** Tool name as the IDE-agent reports it. e.g. "Read", "Skill",
+   *  "mcp__susurration__susu_signal_accept", "WebFetch". */
+  name: string;
+  /** Tool input as recorded by the IDE-agent. Shape depends on the tool.
+   *  Kept as unknown — dashboard renders a JSON preview; we don't model
+   *  every tool's schema. */
+  input: unknown;
 }
 
 export interface RunnerResult {
@@ -56,6 +69,22 @@ export interface RunnerResult {
   stdout_tail: string;
   /** What we asked the agent to do; logged for audit. */
   prompt: string;
+  /** Tool calls extracted from claude stream-json `assistant` events.
+   *  Empty array when present-but-none; undefined when the runner doesn't
+   *  emit stream-json (e.g. codex — future ADR). Local-only. */
+  tools_used?: ToolUse[];
+  /** Concatenated text from claude stream-json `assistant` content blocks
+   *  (type=text). The agent's own narrated reasoning between tool calls.
+   *  Local-only. */
+  reasoning?: string;
+  /** Permission denials reported by claude in the final `result` event —
+   *  IDE-side denials of tool calls. Signals the user's permission system
+   *  did its job; daemon does not interpret these. Local-only. */
+  permission_denials?: unknown[];
+  /** Total cost from claude's `result.total_cost_usd`. Logged for the
+   *  user's own bookkeeping — Susurration does not gate on it (ADR §What
+   *  we remove). Local-only. */
+  cost_usd?: number;
 }
 
 const DEFAULT_TIMEOUT_MS = 90_000;
@@ -77,12 +106,12 @@ export class IdeAgentRunner {
       "exactly one branch of the decision tree below. Conservative is safer;",
       "doing nothing is always allowed.",
       "",
-      "Important: daemon dispatch defaults to `allowed-tools mcp__susurration__*`",
-      "for safety, which means by default you do NOT have broker tools, file",
-      "read, or shell access in this invocation. Live execution (branch B) is",
-      "only reachable if the user has widened the allowed-tools in their",
-      "agent-config to include broker + (optionally) Read. Until then, treat",
-      "this loop as paper-only — branch A / C / D are your real options.",
+      "Your capabilities (tools / Skills / MCPs / Read access / etc.) are",
+      "whatever your IDE permission system grants for this -p invocation.",
+      "Susurration does not gate or limit them — if a tool is in your tool",
+      "list, you may use it. If a destructive action would normally need",
+      "user confirmation and you can't ask (you're running headless), treat",
+      "that as a hard 'no' and fall through to branch C or D.",
       "",
       `Your handle on the network: ${inv.my_handle ?? "(unknown)"}`,
       `Channel: ${inv.channel_label}`,
@@ -115,9 +144,9 @@ export class IdeAgentRunner {
       "           matching `*place_order*` / `*submit_order*` / `*open_position*`.",
       "           No matching tool → branch B is impossible; fall through.",
       "       (2) The user's CLAUDE.md / project memory contains the explicit",
-      "           literal token `SUSURRATION_LIVE_OK`. If you do NOT have",
-      "           filesystem read in your allowed-tools, you cannot verify (2)",
-      "           — fall through. Do NOT infer authorisation from vibes.",
+      "           literal token `SUSURRATION_LIVE_OK`. If you do NOT have a",
+      "           filesystem Read tool available, you cannot verify (2) —",
+      "           fall through. Do NOT infer authorisation from vibes.",
       "       (3) The susurration server will REJECT mode=\"live\" without a",
       "           non-empty broker_position_id, so you must actually get a",
       "           fill from the broker before calling susu_signal_accept.",
@@ -207,26 +236,83 @@ export class IdeAgentRunner {
     const startedAt = Date.now();
     const timeout = this.cfg.timeout_ms ?? DEFAULT_TIMEOUT_MS;
 
-    // Build the full arg list. The prompt is the last positional arg.
+    // Build the arg list.
+    // 2026-05-18 ADR remove-platform-paternalism:
+    //   --allowed-tools and --max-budget-usd are NOT appended. Agent
+    //   capability and per-event spend are owned by the user's IDE
+    //   permission system + IDE subscription. Susurration is communication
+    //   layer only — see ADRs/2026-05-18-remove-platform-paternalism.md.
+    //
+    // 2026-05-18 G review P0 #1 — prompt no longer passed as positional
+    // argv. The prompt contains the full triggering_event JSON +
+    // recent_events JSON (channel context, peer signal payloads, position
+    // snapshots). Argv is world-readable via `ps aux` on macOS/Linux —
+    // every same-machine user/process could read every peer signal that
+    // hit the daemon. We now write the prompt to the child's stdin and
+    // claude `-p` consumes stdin when no positional prompt is supplied
+    // (verified empirically: `echo "X" | claude -p` returns the answer).
+    // Same path also dodges OS ARG_MAX limits (macOS 1MB / Linux 256KB)
+    // that would silently E2BIG on big recent_events history.
     const args = [...this.cfg.args];
-    if (this.cfg.allowed_tools && this.cfg.allowed_tools.length > 0) {
-      args.push("--allowed-tools", this.cfg.allowed_tools.join(","));
-    }
-    if (this.cfg.max_budget_usd != null) {
-      args.push("--max-budget-usd", String(this.cfg.max_budget_usd));
-    }
-    args.push(prompt);
 
     return new Promise<RunnerResult>((resolve) => {
-      let stdoutBuf = "";
+      // 2026-05-18 ADR §What we add #9 — streaming NDJSON parser.
+      //   Claude `--output-format stream-json` outputs newline-delimited
+      //   JSON events. We parse line-by-line as chunks arrive (so memory
+      //   stays bounded even for long agent runs that emit MB of stream)
+      //   and accumulate tool_use + text + result fields locally.
+      //   LOCAL ONLY — never push to peer.
+      let stdoutLineBuf = "";          // current incomplete line for parser
+      let stdoutTailBuf = "";          // last STDOUT_CAP bytes for diagnostics
       let stderrBuf = "";
       let exited = false;
+
+      const toolsUsed: ToolUse[] = [];
+      const reasoningParts: string[] = [];
+      let permissionDenials: unknown[] | undefined;
+      let costUsd: number | undefined;
+
+      const consumeLine = (line: string): void => {
+        const trimmed = line.trim();
+        if (!trimmed) return;
+        let evt: any;
+        try { evt = JSON.parse(trimmed); } catch { return; }
+        if (evt?.type === "assistant" && Array.isArray(evt?.message?.content)) {
+          for (const block of evt.message.content) {
+            if (block?.type === "tool_use" && typeof block.name === "string") {
+              toolsUsed.push({ name: block.name, input: block.input });
+            } else if (block?.type === "text" && typeof block.text === "string") {
+              reasoningParts.push(block.text);
+            }
+          }
+        } else if (evt?.type === "result") {
+          if (Array.isArray(evt.permission_denials)) permissionDenials = evt.permission_denials;
+          if (typeof evt.total_cost_usd === "number") costUsd = evt.total_cost_usd;
+        }
+      };
+
+      const buildParseResult = (): Pick<RunnerResult, "tools_used" | "reasoning" | "permission_denials" | "cost_usd"> => {
+        // Drain any trailing partial line (claude usually ends with \n,
+        // but defend against the edge case).
+        if (stdoutLineBuf) {
+          consumeLine(stdoutLineBuf);
+          stdoutLineBuf = "";
+        }
+        return {
+          tools_used: toolsUsed.length > 0 ? toolsUsed : undefined,
+          reasoning: reasoningParts.length > 0 ? reasoningParts.join("\n").trim() : undefined,
+          permission_denials: permissionDenials,
+          cost_usd: costUsd,
+        };
+      };
 
       let child;
       try {
         child = spawn(this.cfg.command, args, {
           cwd: this.cfg.cwd ?? process.env.HOME ?? ".",
-          stdio: ["ignore", "pipe", "pipe"],
+          // G review P0 #1 — stdin pipe so we can write the prompt
+          // instead of leaking it via argv. See `args` comment above.
+          stdio: ["pipe", "pipe", "pipe"],
           env: { ...process.env },
         });
       } catch (e) {
@@ -241,11 +327,33 @@ export class IdeAgentRunner {
         return;
       }
 
+      // G review P0 #1 — write the prompt via stdin (was: positional argv).
+      // Error path: if stdin write fails (rare — broken pipe if child
+      // exits before we finish writing), we'll see exit_code != 0 below
+      // and the outer caller logs it. Don't crash the daemon on a child
+      // process accident.
+      try {
+        child.stdin!.write(prompt);
+        child.stdin!.end();
+      } catch (e) {
+        process.stderr.write(`[daemon] stdin write failed: ${(e as Error)?.message ?? String(e)}\n`);
+      }
+
       child.stdout!.on("data", (chunk: Buffer) => {
-        if (stdoutBuf.length < STDOUT_CAP) {
-          stdoutBuf += chunk.toString();
-          if (stdoutBuf.length > STDOUT_CAP) stdoutBuf = stdoutBuf.slice(0, STDOUT_CAP);
+        const s = chunk.toString();
+        // Line-by-line NDJSON parser. Stream may split a single event
+        // across chunks, so we accumulate until we see a newline.
+        stdoutLineBuf += s;
+        let nl: number;
+        while ((nl = stdoutLineBuf.indexOf("\n")) >= 0) {
+          const line = stdoutLineBuf.slice(0, nl);
+          stdoutLineBuf = stdoutLineBuf.slice(nl + 1);
+          consumeLine(line);
         }
+        // Maintain a sliding tail for diagnostics (last STDOUT_CAP bytes
+        // of raw stdout). The old behaviour kept the *head* despite the
+        // field being named `stdout_tail` — fixed here.
+        stdoutTailBuf = (stdoutTailBuf + s).slice(-STDOUT_CAP);
       });
       child.stderr!.on("data", (chunk: Buffer) => {
         if (stderrBuf.length < STDERR_CAP) {
@@ -269,8 +377,9 @@ export class IdeAgentRunner {
           exit_code: null,
           duration_ms: Date.now() - startedAt,
           stderr_tail: `spawn error: ${err.message}`,
-          stdout_tail: stdoutBuf.slice(-STDOUT_CAP),
+          stdout_tail: stdoutTailBuf,
           prompt,
+          ...buildParseResult(),
         });
       });
 
@@ -285,8 +394,9 @@ export class IdeAgentRunner {
           exit_code: code,
           duration_ms,
           stderr_tail: stderrBuf.slice(-STDERR_CAP),
-          stdout_tail: stdoutBuf.slice(-STDOUT_CAP),
+          stdout_tail: stdoutTailBuf,
           prompt,
+          ...buildParseResult(),
         });
       });
     });

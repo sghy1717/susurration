@@ -448,7 +448,10 @@ code, pre, kbd {
 /* ── Feed item — the protagonist row ──────────────────────────── */
 .susu-feed-row {
   display: grid;
-  grid-template-columns: 88px 1fr auto;
+  /* 2026-05-18 H review 漏 #1 — bumped from 88px → 110px so the relative
+     time line ("1h 3m ago" / "近 1 小时" etc.) doesn't overflow into the
+     next column in i18n cases where the relative text is longer. */
+  grid-template-columns: 110px 1fr auto;
   gap: var(--susu-s-4);
   padding: var(--susu-s-4) var(--susu-s-5);
   border-bottom: 1px solid var(--susu-hairline);

@@ -8,8 +8,10 @@ import { sql } from "../db.ts";
 
 const CLOSE_INTERVAL_MS = 30_000;
 const TIME_STOP_MS = 48 * 60 * 60 * 1000;
-const TRAILING_STOP_THRESHOLD = 5;
-const TRAILING_STOP_RETRACE = 0.5;
+// 2026-05-17 P26 同步 GS pro: trailing 激活 15% (杠杆后) / continuous lock gap 5%
+//   trigger = max(0, peak - LOCK_GAP). 老逻辑 giveback 50% 已废弃.
+const TRAILING_ACTIVATE_PCT = 15;
+const TRAILING_LOCK_GAP_PCT = 5;
 
 const peakPnlMap = new Map<string, number>();
 
@@ -49,7 +51,7 @@ function parsePosition(row: any): OpenPosition | null {
     leverage,
     entry_price: entryPrice,
     stop_loss: stopLoss ?? entryPrice * (isShort ? 1.08 : 0.92),
-    take_profit: takeProfit ?? entryPrice * (isShort ? 0.88 : 1.12),
+    take_profit: takeProfit ?? entryPrice * (isShort ? 0.85 : 1.15),  // 2026-05-17 P26: TP 12 → 15
     opened_at: new Date(row.created_at),
   };
 }
@@ -68,8 +70,123 @@ async function fetchPrices(): Promise<Record<string, number>> {
   }
 }
 
+// G review P0 #2 (2026-05-18) — Phase 18.2 introduced `/signals/:id/accept`
+// which writes positions directly to the `positions` table (not the legacy
+// reactions + position_closes pair). The original tick() query explicitly
+// `NOT EXISTS positions` to avoid double-closing daemon-tracked rows —
+// which means if the daemon is offline, new-path positions accumulate
+// forever (silent data rot: dashboard shows "open" forever).
+//
+// Fix: run a SECOND fallback pass on the `positions` table specifically
+// for rows whose owner's daemon hasn't pinged for ≥ 10 minutes
+// (almost certainly offline). The daemon-online path is unchanged; this
+// only kicks in when the daemon can't.
+const DAEMON_STALE_MS = 10 * 60 * 1000;
+
+async function tickNewPositionsFallback() {
+  const staleCutoff = new Date(Date.now() - DAEMON_STALE_MS);
+  const rows = await sql<{
+    position_id: string;
+    address: string;
+    signal_id: string;
+    token: string;
+    direction: "long" | "short";
+    leverage: number;
+    entry_price: number;
+    stop_loss: number;
+    take_profit: number;
+    position_usd: number;
+    opened_at: Date;
+  }[]>`
+    SELECT p.position_id::text AS position_id, p.address,
+           p.signal_id::text AS signal_id,
+           p.token, p.direction, p.leverage,
+           p.entry_price, p.stop_loss, p.take_profit, p.position_usd,
+           p.opened_at
+    FROM positions p
+    JOIN identities i ON i.address = p.address
+    WHERE p.mode = 'paper'
+      AND p.closed_at IS NULL
+      AND (i.last_daemon_ping_at IS NULL OR i.last_daemon_ping_at < ${staleCutoff})
+  `;
+  if (rows.length === 0) return;
+  const prices = await fetchPrices();
+  if (Object.keys(prices).length === 0) return;
+
+  type Close = {
+    position_id: string;
+    address: string;
+    signal_id: string;
+    exit_reason: string;
+    exit_price: number;
+    exit_pnl_pct: number;
+    exit_pnl_usd: number;
+  };
+  const closes: Close[] = [];
+  for (const pos of rows) {
+    const cp = prices[pos.token];
+    if (cp === undefined) continue;
+    const isShort = pos.direction === "short";
+    const pnlPct = isShort
+      ? ((pos.entry_price - cp) / pos.entry_price) * 100 * pos.leverage
+      : ((cp - pos.entry_price) / pos.entry_price) * 100 * pos.leverage;
+    const key = `${pos.signal_id}:${pos.address}`;
+    const ageMs = Date.now() - new Date(pos.opened_at).getTime();
+
+    const pushClose = (exit_reason: string, exit_price: number, exit_pnl_pct: number) => {
+      peakPnlMap.delete(key);
+      closes.push({
+        position_id: pos.position_id, address: pos.address, signal_id: pos.signal_id,
+        exit_reason, exit_price, exit_pnl_pct,
+        exit_pnl_usd: (exit_pnl_pct / 100) * pos.position_usd,
+      });
+    };
+
+    if (ageMs > TIME_STOP_MS) { pushClose("TIME", cp, pnlPct); continue; }
+    if (isShort ? cp >= pos.stop_loss : cp <= pos.stop_loss) {
+      const exitPnl = isShort
+        ? ((pos.entry_price - pos.stop_loss) / pos.entry_price) * 100 * pos.leverage
+        : ((pos.stop_loss - pos.entry_price) / pos.entry_price) * 100 * pos.leverage;
+      pushClose("SL", pos.stop_loss, exitPnl); continue;
+    }
+    if (isShort ? cp <= pos.take_profit : cp >= pos.take_profit) {
+      const exitPnl = isShort
+        ? ((pos.entry_price - pos.take_profit) / pos.entry_price) * 100 * pos.leverage
+        : ((pos.take_profit - pos.entry_price) / pos.entry_price) * 100 * pos.leverage;
+      pushClose("TP", pos.take_profit, exitPnl); continue;
+    }
+    const prevPeak = peakPnlMap.get(key) ?? 0;
+    const newPeak = Math.max(prevPeak, pnlPct);
+    peakPnlMap.set(key, newPeak);
+    const trailingTrigger = newPeak - TRAILING_LOCK_GAP_PCT;
+    if (newPeak >= TRAILING_ACTIVATE_PCT && trailingTrigger > 0 && pnlPct < trailingTrigger) {
+      pushClose("TRAIL", cp, pnlPct);
+    }
+  }
+  for (const c of closes) {
+    // Idempotent on closed_at IS NULL — racing daemon won't double-close.
+    await sql`
+      UPDATE positions
+      SET closed_at = now(),
+          exit_reason = ${c.exit_reason},
+          exit_price = ${c.exit_price},
+          exit_pnl_pct = ${c.exit_pnl_pct},
+          exit_pnl_usd = ${c.exit_pnl_usd}
+      WHERE position_id = ${c.position_id}::uuid
+        AND closed_at IS NULL
+    `;
+  }
+  if (closes.length > 0) {
+    console.log(
+      `[position-closer/fallback] closed ${closes.length} stale-daemon paper rows: ` +
+      closes.map(c => `${c.signal_id.slice(0, 8)} ${c.exit_reason}`).join(", "),
+    );
+  }
+}
+
 async function tick() {
   try {
+    await tickNewPositionsFallback();
     // Phase 17.5 — daemon-driven close is the primary path (writes positions
     // with full open+close context). Server-side close is fallback for when
     // daemon is offline / not installed. Skip rows that daemon already owns,
@@ -146,7 +263,9 @@ async function tick() {
       const prevPeak = peakPnlMap.get(key) ?? 0;
       const newPeak = Math.max(prevPeak, pnlPct);
       peakPnlMap.set(key, newPeak);
-      if (newPeak > TRAILING_STOP_THRESHOLD && pnlPct < newPeak * TRAILING_STOP_RETRACE) {
+      // P26: continuous lock gap. peak ≥ 15% 才激活, trigger = peak - 5%, 价跌破 trigger 触发 close
+      const trailingTrigger = newPeak - TRAILING_LOCK_GAP_PCT;
+      if (newPeak >= TRAILING_ACTIVATE_PCT && trailingTrigger > 0 && pnlPct < trailingTrigger) {
         peakPnlMap.delete(key);
         closes.push({ signal_id: pos.signal_id, address: pos.address, exit_reason: "TRAIL", exit_price: cp, exit_pnl_pct: pnlPct });
       }

@@ -312,8 +312,11 @@ api.get("/openapi.json", (c) => {
       "/channels": { post: { summary: "Create group channel", description: "Create a group channel (2-10 members)", tags: ["Channels"] } },
       "/channels/{id}/signals": { post: { summary: "Push signal", description: "Push a trading signal (free-form JSON payload) to a channel", tags: ["Signals"] } },
       "/signals/{id}/reactions": { post: { summary: "React to signal", description: "React +1/-1 with size_factor and note", tags: ["Signals"] } },
+      "/signals/{id}/accept": { post: { summary: "Accept signal (atomic react+open)", description: "Phase 18.2 — atomically writes a +1 reaction and a positions row. Used by IDE-agents via mcp__susurration__susu_signal_accept. mode=paper|live; live requires broker_position_id.", tags: ["Signals"] } },
+      "/signals/{id}/reject": { post: { summary: "Reject signal", description: "Atomically writes a -1 reaction with optional note. Used by IDE-agents via mcp__susurration__susu_signal_reject.", tags: ["Signals"] } },
       "/signals/feed": { get: { summary: "Cross-channel feed", description: "Paginated feed of signals across all channels", tags: ["Signals"] } },
-      "/events/stream": { get: { summary: "SSE event stream", description: "Real-time Server-Sent Events stream for all subscribed channels", tags: ["Events"] } },
+      "/signals/feed/stream": { get: { summary: "SSE event stream — all subscribed channels", description: "Real-time Server-Sent Events. Server emits `event: ping` every 5s as keepalive; `event: open` once on connect (data: {channel_count}); `event: ejected` if the server kicks the connection. Data events are JSON with `kind` ∈ {signal, reaction, channel_member_added, channel_member_removed, channel_owner_transferred, channel_meta_changed, friend_request, friend_accepted, friend_removed, system}. Auth: bearer token OR ?stream_token=... (mint via POST /auth/stream-token, 5min single-use). 2026-05-18 fix — corrected from non-existent /events/stream.", tags: ["Events"] } },
+      "/channels/{channel_id}/signals/stream": { get: { summary: "SSE event stream — single channel", description: "Same payload shape as /signals/feed/stream but scoped to one channel.", tags: ["Events"] } },
       "/billing/allowance": { get: { summary: "Check balance", description: "Check free credits, on-chain allowance, and usage", tags: ["Billing"] } },
     },
     externalDocs: { description: "Full documentation", url: "https://susurration.xyz/docs" },
@@ -404,8 +407,13 @@ if (process.env.SUSU_SERVE_WEB === "1") {
         mcp: "https://susurration.xyz/.well-known/mcp.json",
         api: "https://susurration.xyz/api/openapi.json",
         github: "https://github.com/sghy1717/susurration",
-        install: "npm install -g susurration",
-        quick_start: "susu join",
+        install: "npx -y @susurration/installer install --token sk_xxx",
+        // 2026-05-18 P1 #6 — `susu join` CLI was removed during Phase 18
+        // onboarding rework. The installer is now the single entry point;
+        // it auto-detects the user's IDE-agent CLI and writes
+        // agent-config.json. Quick-start string here must match the
+        // shipped installer flow, not the deprecated CLI.
+        quick_start: "npx -y @susurration/installer install --token sk_xxx",
       });
     }
     await next();

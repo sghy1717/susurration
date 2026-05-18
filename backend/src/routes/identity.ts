@@ -10,31 +10,10 @@ import { check as rateCheck, RateLimitedError } from "../lib/rate_limit.ts";
 import { recordEvent } from "../lib/events.ts";
 import { generateWebhookSecret } from "../lib/webhook.ts";
 
-// Hostname-substring + resolved-IP check for webhook URLs. Substring catches
-// the easy cases ("localhost", "*.internal"). DNS lookup is the second line:
-// it stops "evil.com → 127.0.0.1" rebinding registrations from passing the
-// textual check today, then resolving to a private IP at delivery time. Both
-// IPv4 and IPv6 private/loopback/link-local ranges are rejected. We don't
-// guard against the time-of-check / time-of-use window in this single
-// validate call — the actual webhook fetcher (when it lands) MUST re-resolve
-// at delivery and apply the same checks.
-const PRIVATE_HOST_PATTERN = /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|0\.|169\.254\.)/;
-function isPrivateOrLoopback(host: string): boolean {
-  const h = host.toLowerCase();
-  return h === "localhost"
-    || h.endsWith(".local")
-    || h.endsWith(".internal")
-    || h === "[::1]"
-    || PRIVATE_HOST_PATTERN.test(h);
-}
-function isPrivateIp(ip: string): boolean {
-  const lower = ip.toLowerCase();
-  if (lower === "::1" || lower === "0:0:0:0:0:0:0:1") return true;
-  if (lower.startsWith("fc") || lower.startsWith("fd")) return true;       // IPv6 ULA
-  if (lower.startsWith("fe80:")) return true;                              // IPv6 link-local
-  if (lower.startsWith("::ffff:")) return isPrivateIp(lower.slice(7));     // IPv4-mapped
-  return PRIVATE_HOST_PATTERN.test(lower);
-}
+// 2026-05-18 G review P1 #1 — moved to shared/network-safety.ts. See the
+// header comment there. Setup-time check (this file) + delivery-time check
+// (backend/src/lib/webhook.ts) now read the same helpers.
+import { isPrivateOrLoopback, isPrivateIp } from "../../../shared/network-safety.ts";
 
 export const identityRoutes = new Hono();
 

@@ -23,7 +23,14 @@ const DEFAULT_TP_PCT = 0.12;       // 12% above entry
 const DEFAULT_TIME_STOP_HOURS = 48;
 const DEFAULT_TRAILING_ACTIVATE = 15; // activate trailing at 15% leveraged PnL
 const DEFAULT_TRAILING_GIVEBACK = 50; // close when 50% of peak PnL lost
-const DEFAULT_INITIAL_BALANCE = 100;
+// 2026-05-18 P0 #3 — match backend/src/routes/book.ts INITIAL_BALANCE_USD.
+// Previously 100; backend was 100_000 with a misleading "matches daemon"
+// comment. Dashboard snapshot uses 100_000 to compute balance, so a fresh
+// daemon with 100 produced a 1000× discrepancy between local paper book
+// PnL and dashboard PnL display. New default aligned: 100k paper account.
+// Existing books are loaded from disk and unaffected — only first-run
+// initialization sees this constant.
+const DEFAULT_INITIAL_BALANCE = 100_000;
 const TRACK_INTERVAL_MS = 60_000;  // check positions every 60s
 
 // ── Types ───────────────────────────────────────────────────────────────
@@ -417,6 +424,16 @@ export class PaperTrader {
 
   /** Check all open positions against current prices. Close on SL/TP/trailing/time. */
   private async trackPositions(): Promise<void> {
+    // 2026-05-18 P0 #1 fix — pull server-side positions BEFORE every tick.
+    // Phase 18 ADR routed signal accept through the IDE-agent's MCP call
+    // (susu_signal_accept) which atomically writes reaction + positions
+    // server-side; daemon's local paper book never sees those new opens.
+    // Backend position_closer also skips rows present in `positions`
+    // (server-only fallback for offline daemons), so without this re-sync
+    // every tick the new MCP-opened paper rows would be stranded —
+    // never tracked for SL/TP/trailing/time and never closed automatically.
+    // Cheap (one indexed GET /positions/mine per minute per device).
+    await this.syncFromServerOnce();
     const book = this.loadBook();
     const openTrades = book.trades.filter((t) => t.status === "open");
     if (openTrades.length === 0) return;

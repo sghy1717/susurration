@@ -484,6 +484,43 @@ export function useDaemonState() {
   return usePoll<DaemonState>("/daemon/state", 8_000);
 }
 
+// 2026-05-18 Haze ask — feed row shows the position size your agent took
+// (or "no open" if it didn't). We need positions indexed by signal_id
+// across BOTH open + closed states (a row may already be closed by the
+// time the user scrolls past it). useOpenPositions is open-only; this hook
+// fetches `status=all` so a feed row can find its position regardless of
+// lifecycle.
+export function useAllPositions(mode: ModeFilter = "all", limit = 200) {
+  const q = mode === "all"
+    ? `status=all&limit=${limit}`
+    : `status=all&mode=${mode}&limit=${limit}`;
+  return usePoll<{ positions: Position[] }>(`/positions/mine?${q}`, 10_000);
+}
+
+// 2026-05-18 ADR remove-platform-paternalism §What we add #10.
+// Reusable hook over /daemon_decisions/mine. Caller-bound by ACL — the
+// caller sees only their own decisions. Fields include local-only
+// tools_used / cost_usd / permission_denials from claude stream-json
+// parse; peer agents never see this data.
+export interface RecentDecision {
+  decision_id: string;
+  kind: string;
+  event_kind: string | null;
+  signal_id: string | null;
+  channel_id: string | null;
+  error_type: string | null;
+  latency_ms: number | null;
+  context: Record<string, string> | null;
+  created_at: string;
+  tools_used?: Array<{ name: string; input: unknown }> | null;
+  permission_denials?: unknown[] | null;
+  cost_usd?: number | null;
+  reasoning_summary?: string | null;
+}
+export function useRecentDecisions(limit: number = 30) {
+  return usePoll<{ decisions: RecentDecision[] }>(`/daemon_decisions/mine?limit=${limit}`, 15_000);
+}
+
 export function usePeersStats(days: number = 30) {
   return usePoll<PeerStatsResponse>(`/peers/stats?days=${days}`, 30_000);
 }
@@ -865,12 +902,16 @@ export function useFeedSSE(initial: FeedItem[]) {
       try {
         setState(s => ({ ...s, status: "connecting", error: null }));
         // Mint a short-lived stream token (EventSource can't send headers).
-        const tok = await api<{ token: string }>({
+        // 2026-05-18 fix — backend returns `{ stream_token, expires_at }`,
+        // not `{ token }`. Reading `tok.token` yielded undefined → URL
+        // included literal `stream_token=undefined` → every connect 401'd,
+        // dashboard topbar permanently showed `sse error`.
+        const tok = await api<{ stream_token: string; expires_at: string }>({
           path: "/auth/stream-token",
           method: "POST",
         });
         if (cancelled) return;
-        const url = apiBase.replace(/\/$/, "") + `/signals/feed/stream?stream_token=${encodeURIComponent(tok.token)}`;
+        const url = apiBase.replace(/\/$/, "") + `/signals/feed/stream?stream_token=${encodeURIComponent(tok.stream_token)}`;
         es = new EventSource(url);
         es.onopen = () => {
           if (cancelled) return;

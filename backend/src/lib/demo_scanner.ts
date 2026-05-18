@@ -17,6 +17,16 @@ const SCAN_INTERVAL_MS = 60_000;
 const MIN_OI_CHANGE_PCT = 8;
 const DEDUP_HOURS = 24;
 const SOURCE_ID = "GS-pro-scanner-v2";
+// 2026-05-18 Haze decision — emit GS pro strategy-recommended sizing as
+// part of the signal so receiver agents have an absolute number to take
+// (per agent_runner.buildPrompt: "pricing fields taken from the signal
+// payload"). Mirror local scanner_paper.py — 100k reference book, 30%
+// per-signal position. Receivers are free to ignore (Susurration thesis:
+// signal source suggests; receiver decides) but at least the suggestion
+// exists in the payload instead of agents defaulting to $100 paper bets.
+const REF_INITIAL_BALANCE_USD = 100_000;
+const REF_POSITION_PCT = 30;
+const REF_POSITION_USD = REF_INITIAL_BALANCE_USD * REF_POSITION_PCT / 100;  // $30k
 
 // ── State (in-process, resets on deploy — acceptable for dedup) ─────────
 let prevFrSnapshot: Record<string, number> = {};
@@ -207,11 +217,11 @@ function buildPayload(sig: ScanSignal) {
   const confidence = Math.round(Math.min(Math.max(0.4 + 0.3 * oiScore, 0.4), 0.9) * 100) / 100;
 
   const isShort = sig.direction === "short";
-  // Mirror local scanner_paper.py SL/TP convention (8% SL / 12% TP):
-  //   LONG  : SL below entry,  TP above entry
-  //   SHORT : SL above entry,  TP below entry
+  // Mirror local scanner_paper.py SL/TP convention (8% SL / 15% TP, 2026-05-17 P26):
+  //   LONG  : SL below entry (entry*0.92),  TP above entry (entry*1.15)
+  //   SHORT : SL above entry (entry*1.08),  TP below entry (entry*0.85)
   const sl = isShort ? sig.price * 1.08 : sig.price * 0.92;
-  const tp = isShort ? sig.price * 0.88 : sig.price * 1.12;
+  const tp = isShort ? sig.price * 0.85 : sig.price * 1.15;
   return {
     direction: sig.direction,
     token: sig.symbol,
@@ -224,6 +234,11 @@ function buildPayload(sig: ScanSignal) {
       stop_loss: Math.round(sl * 1e8) / 1e8,
       take_profit: Math.round(tp * 1e8) / 1e8,
       leverage: 3,
+      // 2026-05-18 Haze decision — see REF_POSITION_USD constant above.
+      // GS pro suggests its strategy-typical sizing for a 100k account so
+      // receivers can size paper trades meaningfully out of the box.
+      position_pct: REF_POSITION_PCT,
+      position_usd: REF_POSITION_USD,
       time_stop_hours: 48,
       raw_signal: {
         oi_change_pct: Math.round(sig.oiChangePct * 100) / 100,
@@ -252,18 +267,25 @@ async function pushToAllDemoChannels(payload: unknown) {
 
   for (const { channel_id } of channels) {
     try {
-      const insert = await sql<{ signal_id: string; created_at: Date }[]>`
-        INSERT INTO signals(channel_id, from_address, payload)
-        VALUES (${channel_id}, ${demoAddress}, ${sql.json(sanitized as any)})
-        RETURNING signal_id, created_at
-      `;
-      const row = insert[0]!;
-
-      // Usage log (cost=0 for demo — no metering)
-      await sql`
-        INSERT INTO usage_log(address, channel_id, signal_id, call_type, cost_usd)
-        VALUES (${demoAddress}, ${channel_id}, ${row.signal_id}, 'signal_push', 0)
-      `;
+      // 2026-05-18 G review P1 #6 — wrap signal INSERT + usage_log in a
+      // transaction so they share atomicity with the user-driven path in
+      // `signals.ts:422+`. cost=0 makes it benign today, but keeping the
+      // two paths symmetric removes a footgun if demo ever moves to a
+      // non-zero meter and a crash between the two INSERTs leaves a
+      // signal without its usage row.
+      const row = await sql.begin(async (tx) => {
+        const insert = await tx<{ signal_id: string; created_at: Date }[]>`
+          INSERT INTO signals(channel_id, from_address, payload)
+          VALUES (${channel_id}, ${demoAddress}, ${sql.json(sanitized as any)})
+          RETURNING signal_id, created_at
+        `;
+        const r = insert[0]!;
+        await tx`
+          INSERT INTO usage_log(address, channel_id, signal_id, call_type, cost_usd)
+          VALUES (${demoAddress}, ${channel_id}, ${r.signal_id}, 'signal_push', 0)
+        `;
+        return r;
+      });
 
       const wireEvent = {
         kind: "signal" as const,
