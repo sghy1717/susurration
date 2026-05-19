@@ -166,7 +166,16 @@ function DecisionRow({ d }: { d: DaemonDecisionRow }) {
           ) : null}
         </span>
         <span style={{ color: "var(--susu-ink-subtle)", whiteSpace: "nowrap" }}>
-          {d.cost_usd != null ? `$${d.cost_usd.toFixed(4)}` : ""}
+          {(() => {
+            // Defensive: backend NUMERIC parser in db.ts gives number, but a
+            // stale localStorage snapshot from an older bundle may still hold
+            // string. Coerce + sanity-check rather than calling .toFixed on
+            // an unknown type — the 2026-05-19 whitescreen happened exactly
+            // here.
+            if (d.cost_usd == null) return "";
+            const n = typeof d.cost_usd === "number" ? d.cost_usd : Number(d.cost_usd);
+            return Number.isFinite(n) ? `$${n.toFixed(4)}` : "";
+          })()}
         </span>
         <span style={{ color: "var(--susu-ink-subtle)", whiteSpace: "nowrap" }}>
           {d.latency_ms != null ? `${d.latency_ms}ms` : ""}

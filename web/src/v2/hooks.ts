@@ -213,7 +213,13 @@ const visibilityRefetchers = new Set<() => void>();
 // 500-event payloads, /prices with its tick churn) skip the persist layer
 // — feed is reconstructed by SSE and prices change too fast to be useful
 // stale.
-const PERSIST_PREFIX = "susu.v2.cache:";
+// Bump this prefix whenever a backend payload shape changes in a way that
+// could break a still-cached snapshot. 2026-05-19 v2→v3: NUMERIC columns
+// (cost_usd, free_credits_usd, ...) now arrive as JS number instead of
+// string; v2 caches contain string and would crash DaemonPage on cold paint
+// before SWR revalidate could replace them.
+const PERSIST_PREFIX = "susu.v3.cache:";
+const PERSIST_PREFIX_LEGACY = ["susu.v2.cache:"];
 // Per-entry size cap. 100 KB is plenty for any snapshot we care about and
 // keeps a runaway response from eating the entire 5-10 MB localStorage
 // budget. Computed lazily because TextEncoder isn't free on every write.
@@ -267,15 +273,32 @@ function savePersisted(path: string, data: unknown): void {
 
 /** Purge every persisted cache entry. Called from session.clear() on
  *  sign-out and from session.set() when a different account logs in
- *  (cross-account pollution prevention). */
+ *  (cross-account pollution prevention). Also clears legacy-prefix orphans
+ *  left behind by prior cache version bumps. */
 export function clearPersistedCache(): void {
   try {
+    const prefixes = [PERSIST_PREFIX, ...PERSIST_PREFIX_LEGACY];
     const keys: string[] = [];
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i);
-      if (k && k.startsWith(PERSIST_PREFIX)) keys.push(k);
+      if (k && prefixes.some(p => k.startsWith(p))) keys.push(k);
     }
     for (const k of keys) localStorage.removeItem(k);
+  } catch { /* never fatal */ }
+}
+
+// Sweep legacy-prefix cache entries on module load. Stale shapes from an
+// older bundle (e.g. NUMERIC-as-string from v2 caches) would crash the
+// initial paint before SWR could replace them. Running unconditionally on
+// load means a single hard-refresh after a version bump is enough.
+if (typeof localStorage !== "undefined") {
+  try {
+    const legacyKeys: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && PERSIST_PREFIX_LEGACY.some(p => k.startsWith(p))) legacyKeys.push(k);
+    }
+    for (const k of legacyKeys) localStorage.removeItem(k);
   } catch { /* never fatal */ }
 }
 
