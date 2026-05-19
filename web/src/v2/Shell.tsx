@@ -27,6 +27,18 @@ function useNow(intervalMs: number = 1000): number {
 export function Shell({ pageLabel, topbarAux, topbarActions, children }: ShellProps) {
   const { data: daemon } = useDaemonState();
   const { data: me } = useWhoAmI();
+  // anon = no session token in localStorage (whoami would 401 anyway).
+  // Check the storage directly so we render the sign-in splash on the very
+  // first paint instead of flashing the empty dashboard during the whoami
+  // round-trip. This fixes the onboarding dead-end where a logged-out user
+  // hit /v2/overview and saw an empty dashboard with no sign-in entry.
+  const hasToken = typeof window !== "undefined"
+    && (localStorage.getItem("susu.token") || localStorage.getItem("susu_token"));
+  // G verified usePoll seeds `data: null` (not undefined) on first paint,
+  // so the wait-for-fetch guard has to be `me !== null`. Using `!== undefined`
+  // would treat the initial paint as logged-in-but-no-username and flash the
+  // splash for every logged-in user on first visit.
+  const isAnon = !hasToken || (me !== null && !me?.username);
   const now = useNow();
   const { t, lang, setLang } = useLang();
   const location = useLocation();
@@ -64,6 +76,19 @@ export function Shell({ pageLabel, topbarAux, topbarActions, children }: ShellPr
     if (daemon.last_ping_at) return durationStr(daemon.last_ping_at, now);
     return t("v2.shell.status.online");
   })();
+
+  // Anon users have nothing to see in the dashboard chrome — no daemon, no
+  // friends, no peers. Render a full-bleed sign-in splash instead so they
+  // don't see the empty rail + a topbar dot that "daemon" status is unknown.
+  if (isAnon) {
+    return (
+      <div className="susu-shell">
+        <main className="susu-main" style={{ marginLeft: 0 }}>
+          <AnonSplash />
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div className={`susu-shell${railOpen ? " rail-open" : ""}`}>
@@ -177,6 +202,66 @@ export function Shell({ pageLabel, topbarAux, topbarActions, children }: ShellPr
 
         <div className="susu-content">{children}</div>
       </main>
+    </div>
+  );
+}
+
+// Sign-in splash rendered when whoami is unauthenticated. v2 doesn't ship
+// its own wallet adapter; we hand off to /v0/dashboard which has the full
+// Phantom / OKX sign-in + handle-register + installer flow (DashboardPage
+// step 1-3). The `?return=v2` query tells the v0 onboarding component to
+// `window.location = /v2/overview` when the user clicks "Enter Dashboard"
+// at step 3 (DashboardPage.tsx around line 1012), so the loop closes.
+function AnonSplash() {
+  const { t } = useLang();
+  return (
+    <div style={{
+      display: "flex", flexDirection: "column", alignItems: "center",
+      justifyContent: "center", textAlign: "center",
+      minHeight: "100vh",
+      padding: "var(--susu-s-6)",
+      gap: "var(--susu-s-4)",
+    }}>
+      <div className="susu-h1" style={{ maxWidth: 560 }}>
+        {t("v2.anon.title")}
+      </div>
+      <div style={{
+        color: "var(--susu-ink-subtle)",
+        fontSize: "var(--susu-text-md)",
+        maxWidth: 480,
+        lineHeight: 1.55,
+      }}>
+        {t("v2.anon.body")}
+      </div>
+      <a
+        href="/v0/dashboard?return=v2"
+        className="susu-btn-primary"
+        style={{
+          display: "inline-block",
+          padding: "12px 24px",
+          marginTop: "var(--susu-s-3)",
+          fontFamily: "var(--susu-mono)",
+          fontSize: "var(--susu-text-md)",
+          background: "var(--susu-accent, #4eb1ff)",
+          color: "#06121a",
+          borderRadius: 6,
+          textDecoration: "none",
+          fontWeight: 600,
+        }}
+      >
+        {t("v2.anon.cta")}
+      </a>
+      <a
+        href="/docs"
+        style={{
+          color: "var(--susu-ink-subtle)",
+          fontSize: "var(--susu-text-sm)",
+          textDecoration: "underline",
+          marginTop: "var(--susu-s-2)",
+        }}
+      >
+        {t("v2.anon.docs")}
+      </a>
     </div>
   );
 }

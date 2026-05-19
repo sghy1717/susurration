@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useRef, useEffect, createContext, useContext } from "react";
 import { useLang, LangToggle } from "./i18n.tsx";
 import { AGENT_DOC } from "../../shared/agent-doc.ts";
+import { session } from "./api";
 import bs58 from "bs58";
 
 const API = "/api";
@@ -1012,6 +1013,15 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
               onClick={() => {
                 fireOnboardingEvent("enter_dashboard", { agent: "installer", result: "detected", context: { test_passed: "true" } });
                 localStorage.setItem("susu_agent", "installer");
+                // If the user was sent here from v2's anon splash (CTA carries
+                // ?return=v2), close the onboarding by navigating into the v2
+                // dashboard — that's where the rest of the product lives.
+                // Otherwise fall back to the legacy behavior (drop into v0).
+                const params = new URLSearchParams(window.location.search);
+                if (params.get("return") === "v2") {
+                  window.location.href = "/v2/overview";
+                  return;
+                }
                 onComplete();
               }}
             >{lang === "zh" ? "进入 Dashboard" : "Enter Dashboard"}</button>
@@ -2855,8 +2865,12 @@ function SettingsPage({ onShowOnboarding }: { onShowOnboarding: () => void }) {
                 disabled={disconnectState !== "idle"}
                 onClick={() => {
                   setDisconnectState("ing");
-                  localStorage.removeItem("susu_token");
-                  localStorage.removeItem("susu_address");
+                  // 2026-05-19 — was leaking dot-key tokens + v2 SWR cache on
+                  // logout, which made the v2 anon splash detection miss
+                  // and left stale @user data visible after sign-out. Use
+                  // session.clear() (api.ts) — it covers both v0 underscore
+                  // and v2 dot keys plus the SWR cache.
+                  session.clear();
                   localStorage.removeItem("susu_handle");
                   setTimeout(() => { setDisconnectState("done"); window.location.reload(); }, 800);
                 }}
@@ -3014,7 +3028,16 @@ function ModeDocSection() {
 //   MAIN DASHBOARD LAYOUT
 // ════════════════════════════════════════════════════════
 export function DashboardPage() {
-  const [showOnboarding, setShowOnboarding] = useState(() => !localStorage.getItem("susu_token"));
+  // Show onboarding for two cases:
+  //   1. no token at all (fresh user / post-logout)
+  //   2. token present but no handle locked-in (half-registered — wallet
+  //      signed but `susu register` never finished). Without this second
+  //      condition, a v2 anon splash → /v0/dashboard?return=v2 user who
+  //      had a stale token but no handle would skip Onboarding entirely
+  //      and never reach step 3 to trigger the v2 redirect. (G review 🟡 #1)
+  const [showOnboarding, setShowOnboarding] = useState(() =>
+    !localStorage.getItem("susu_token") || !localStorage.getItem("susu_handle"),
+  );
   const [page, setPage] = useState<Page>(() => {
     const saved = localStorage.getItem("susu_page") as Page | null;
     return saved && ["dashboard", "feed", "friends", "mode", "settings"].includes(saved) ? saved : "dashboard";
