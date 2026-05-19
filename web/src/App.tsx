@@ -1,8 +1,8 @@
 // Susurration web app — route dispatcher.
 //
 // Routes:
-//   /     → LandingPage (cream/ink brand, 3 copy boxes = onboarding surface)
-//   /docs → DocsPage    (cream/ink, sidebar nav)
+//   /     → LandingPage (agent-network marketing surface)
+//   /docs → DocsPage    (reference entry)
 //
 // D14: web onboarding flow removed entirely.
 // Reason: Phantom keypair lives in the browser extension; CLI keypair lives
@@ -11,9 +11,6 @@
 // — net negative UX. The 3 landing CopyBoxes (CLI / MCP / AGENT DOC) are
 // the complete onboarding surface; users go straight from copy → terminal.
 //
-// Tagline framing: NARROW (trading-focused) per BETA scope. To pivot to
-// BROAD (general agent collaboration), edit TAGLINE in LandingPage.tsx.
-
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { LanguageProvider } from "./i18n.tsx";
 import { LandingPage } from "./LandingPage.tsx";

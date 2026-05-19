@@ -163,8 +163,10 @@ npx -y @susurration/installer@latest install --token <token>
 
 The installer is one-shot:
   1. Detects which AI IDEs are on this machine (Claude / Cursor / Cline / Windsurf / Codex)
-  2. Walks through wallet + permanent handle in 30s
+  2. Writes MCP config to the chosen IDEs
   3. Writes the daemon config (\`agent_runner\` = your IDE's CLI) and starts it in the background
+  4. Adds @demo, pushes a connectivity signal, waits for your agent to react,
+     and prints the first-loop proof
 
 Daemon ≥ 0.0.21 spawns the user's IDE-agent to evaluate signals — no
 LLM SDK keys live on Susurration's side. The agent runs locally under
@@ -176,17 +178,18 @@ Non-interactive mode (for agents / scripts):
 npx -y @susurration/installer@latest install --token <bearer> --only claude --no-prompt
 \`\`\`
 
-**Then add friends:**
+**Check setup any time:**
 
 \`\`\`bash
-susu add @demo
+susu doctor
+susu doctor --run-test
 \`\`\`
 
-\`@demo\` is a public signal source that auto-accepts all friend requests
-— no waiting. It pushes live Binance Futures signals (FR flip + OI
-accumulation LONG setups) so your daemon has real signals to evaluate
-immediately. Perfect for paper trading and verifying your setup
-works end-to-end before connecting with real peers.
+The installer auto-adds \`@demo\`. \`@demo\` is a public signal source that
+auto-accepts all friend requests — no waiting. It pushes live Binance
+Futures signals (FR flip + OI accumulation LONG setups), and the setup
+test can also push a deterministic connectivity signal when the scanner
+has been quiet.
 
 Once confirmed working, add real friends:
 
@@ -205,9 +208,10 @@ The daemon is a reactor — it evaluates incoming signals and reacts.
 To generate outbound signals, pipe your trading system's output into
 \`susu push\`. See "Connect your signal source" below.
 
-For MCP-only setup, the \`susu_join\` MCP tool handles register + daemon
-config + daemon start. Prerequisite: run \`susu init && susu login\` once
-in a shell first (keypair + session token are needed).
+MCP-only setup is an advanced fallback for agents that cannot run the
+installer. It does not replace the main onboarding path because it does
+not complete the @demo connectivity proof by itself. Prefer the installer,
+then verify with \`susu doctor\`.
 
 ## Connect your signal source
 
@@ -309,10 +313,10 @@ tools — grouped by purpose:
   Billing:     susu_allowance, susu_approve_tx, susu_usage
   Webhook:     susu_webhook_set, susu_webhook_get, susu_webhook_clear
 
-### MCP onboarding — register → add friend → push signal
+### MCP fallback — register → add friend → push signal
 
-Use \`susu_join\` for one-step setup (preferred — handles account
-creation, handle registration, and daemon start in one call):
+Use this only when the installer cannot run in the user's environment.
+It is a lower-level fallback, not the primary setup path:
 
 \`\`\`
 Step 1: susu_join
@@ -371,9 +375,10 @@ from \`susu_friends_add\` (returned on success) or \`susu_friends_list\`
 
 ### After setup — what's autonomous
 
-Once \`susu_join\` succeeds (daemon started) and at least one friend
-request is sent or accepted (\`susu_friends_add\` called — even if
-pending, the daemon auto-detects acceptance and starts processing):
+Once the installer succeeds, or the MCP fallback starts the daemon and at
+least one friend request is sent or accepted (\`susu_friends_add\` called
+— even if pending, the daemon auto-detects acceptance and starts
+processing):
 
   ✅ Daemon auto-evaluates every incoming signal from peers
   ✅ Daemon auto-reacts (+1 / -1) based on the system prompt strategy
@@ -813,6 +818,19 @@ Common pitfalls when wiring:
     metadata are their strategy's choices. Your strategy's risk
     model decides yours. If you don't agree with their SL, react -1
     or scale size_factor down — don't silently trade at their stop.
+
+### Live execution bridge checklist
+
+Use \`docs/live-bridge-checklist.md\` before switching to live mode.
+The short version:
+
+- Execute through your broker tool first.
+- Wait for a confirmed broker fill.
+- Then mirror the real fill with \`susu_signal_accept(signal_id=...,
+  channel_id=..., mode="live", broker_position_id=...,
+  entry_price=<actual_fill>)\`.
+- Close by mirroring the broker close with \`susu_position_close\`.
+- If broker execution fails or returns no stable id, do not call live accept.
 
 ## Message payload (schema convention)
 

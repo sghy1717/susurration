@@ -341,6 +341,9 @@ function usePoll<T>(
   intervalMs: number,
   enabled: boolean = true,
 ): { data: T | null; error: ApiError | null; loading: boolean; refetch: () => void } {
+  const publicPath = path?.startsWith("/prices") || path?.startsWith("/daemon/latest-version");
+  const hasToken = !!session.token;
+  const active = enabled && (!path || publicPath || hasToken);
   // Seed state from cache so a fresh-mount component renders prior data
   // immediately instead of flashing a loading state.
   //   1. memory cache wins (same page lifetime)
@@ -348,7 +351,7 @@ function usePoll<T>(
   // Either way, we always trigger a background fetch — the seed is just
   // there to keep the UI populated during the round-trip.
   let seed: T | undefined;
-  if (path) {
+  if (path && active) {
     const mem = pollCache.get(path);
     if (mem) {
       seed = mem.data as T;
@@ -364,7 +367,7 @@ function usePoll<T>(
   }
   const [data, setData] = useState<T | null>(seed ?? null);
   const [error, setError] = useState<ApiError | null>(null);
-  const [loading, setLoading] = useState<boolean>(seed === undefined);
+  const [loading, setLoading] = useState<boolean>(seed === undefined && active);
   // mountedRef guards setState calls from in-flight fetches that resolve
   // after the component unmounts (common on rapid tab switches now that
   // the cache makes navigation feel instant). Without it React warns
@@ -373,13 +376,13 @@ function usePoll<T>(
   const mountedRef = useRef(true);
 
   const fetchOnce = useCallback(async () => {
-    if (!path || !enabled) return;
+    if (!path || !active) return;
     // Dedupe: if another component already has an in-flight request for
     // this path, attach to it instead of issuing a parallel call.
     let entry = inflight.get(path);
     if (!entry) {
       const ctrl = new AbortController();
-      const promise = api<T>({ path, signal: ctrl.signal });
+      const promise = api<T>({ path, signal: ctrl.signal, auth: publicPath ? false : undefined });
       entry = { promise, ctrl };
       inflight.set(path, entry);
       promise.finally(() => {
@@ -451,11 +454,14 @@ function usePoll<T>(
     } finally {
       if (mountedRef.current) setLoading(false);
     }
-  }, [path, enabled]);
+  }, [path, active, publicPath]);
 
   useEffect(() => {
     mountedRef.current = true;
-    if (!path || !enabled) return;
+    if (!path || !active) {
+      setLoading(false);
+      return;
+    }
     if (pollCache.has(path)) {
       setData(pollCache.get(path)!.data as T);
       setLoading(false);
@@ -483,7 +489,7 @@ function usePoll<T>(
       clearInterval(id);
       visibilityRefetchers.delete(fetchOnce);
     };
-  }, [path, intervalMs, enabled, fetchOnce]);
+  }, [path, intervalMs, active, fetchOnce]);
 
   return { data, error, loading, refetch: fetchOnce };
 }
@@ -606,9 +612,12 @@ export function useDaemonUpgrade(): UpgradeStatus {
   //    probe happens later, only after the user clicks (see triggerUpgrade).
   useEffect(() => {
     let cancelled = false;
+    const hasToken = !!session.token;
     Promise.all([
-      api<{ last_daemon_version: string | null }>({ path: "/identity/whoami" }).catch(() => ({ last_daemon_version: null })),
-      api<{ version: string | null }>({ path: "/daemon/latest-version" }).catch(() => ({ version: null })),
+      hasToken
+        ? api<{ last_daemon_version: string | null }>({ path: "/identity/whoami" }).catch(() => ({ last_daemon_version: null }))
+        : Promise.resolve({ last_daemon_version: null }),
+      api<{ version: string | null }>({ path: "/daemon/latest-version", auth: false }).catch(() => ({ version: null })),
     ]).then(([me, latest]) => {
       if (cancelled) return;
       setCurrentVersion(me.last_daemon_version ?? null);

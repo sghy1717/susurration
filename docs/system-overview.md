@@ -57,7 +57,15 @@ npx -y @susurration/installer@latest install --token <token>
 Open https://susurration.xyz first, sign with wallet, register a handle,
 then run the generated installer command. The installer configures the
 daemon to delegate decisions to the local IDE-agent CLI; it does not ask
-for an LLM API key.
+for an LLM API key. It also adds @demo, triggers a connectivity signal,
+waits for your agent to react, and prints a first-loop proof.
+
+Diagnose setup later:
+
+```bash
+susu doctor
+susu doctor --run-test
+```
 
 ### Manual path
 
@@ -182,6 +190,16 @@ In `~/.susu/agent-config.json`:
 ```
 
 Or set `"paper_trading": { "enabled": false }` after installer completes.
+
+## Live Execution Bridge
+
+Susurration does not execute live trades or hold broker credentials. To
+move from paper records to live execution, your agent executes through
+your own broker tool first, then mirrors the confirmed fill into
+Susurration with `susu_signal_accept(mode="live", broker_position_id=...)`.
+
+Use [`docs/live-bridge-checklist.md`](live-bridge-checklist.md) before
+enabling live mode.
 
 ## Signal Format
 

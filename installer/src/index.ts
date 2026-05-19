@@ -7,13 +7,12 @@
 //   1. install_daemon        → npm install -g susurration-agent-daemon
 //   2. mount_to_ide          → write MCP config to each detected IDE
 //   3. connect_susurration   → write ~/.susu/agent-config.json + spawn daemon
-//   4. first_signal_ready    → backend already pushed welcome+replay to channel
-//                              (this stage is a "confirm visible" ping)
+//   4. first_loop_proof      → add @demo, trigger connectivity signal, wait
+//                              for the user's daemon/agent to react
 //
 // AGENT-THESIS COMPLIANCE: the installer never starts an LLM, never proxies
-// LLM calls. The user's own LLM (Claude / GPT / DeepSeek / etc.) is what
-// evaluates signals — this tool only places config files and starts the
-// daemon that connects to the user's LLM.
+// LLM calls. The user's own IDE-agent is what evaluates signals — this tool
+// only places config files, starts the daemon, and verifies the first loop.
 
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, renameSync, unlinkSync } from "node:fs";
@@ -103,6 +102,10 @@ OPTIONS
   --only <ide>              Restrict to one IDE: claude | cursor | windsurf | cline | codex
   -h, --help                Show this help
 
+AFTER INSTALL
+  susu doctor               Diagnose token, daemon, MCP, @demo, feed, and proof
+  susu doctor --run-test    Push a connectivity signal and wait for your agent's reaction
+
 WHAT IT DOES
   1. Detects which AI IDEs are installed on this machine
   2. Asks you which IDEs to configure (default: all detected)
@@ -110,7 +113,8 @@ WHAT IT DOES
   4. Writes MCP config to each chosen IDE so your agent gets susu_* tools
   5. Writes ~/.susu/agent-config.json with your token + IDE-agent runner
   6. Spawns the daemon in the background
-  7. Tells you to quit + reopen your IDE (MCP loads on startup)
+  7. Adds @demo, sends a connectivity signal, and waits for your agent's reaction
+  8. Prints a final proof summary: daemon, reaction, and paper position status
 
 After completion, your IDE's AI agent gets the susu_* MCP tools, and the
 daemon delegates every peer signal to your agent CLI — running with your
@@ -560,6 +564,135 @@ function spawnDaemonDetached(configPath: string): { ok: true; pid: number | null
   }
 }
 
+// ─── Setup proof helpers ───────────────────────────────────────────────
+
+interface ApiResult<T = any> {
+  ok: boolean;
+  status: number;
+  body: T;
+}
+
+async function apiJson<T = any>(
+  baseUrl: string,
+  token: string,
+  path: string,
+  init: RequestInit = {},
+): Promise<ApiResult<T>> {
+  const ctrl = new AbortController();
+  const timeout = setTimeout(() => ctrl.abort(), 10_000);
+  try {
+    const resp = await fetch(`${baseUrl.replace(/\/$/, "")}${path}`, {
+      ...init,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+        ...((init.headers as Record<string, string>) ?? {}),
+      },
+      signal: ctrl.signal,
+    });
+    const ct = resp.headers.get("content-type") ?? "";
+    const body = ct.includes("application/json") ? await resp.json() : await resp.text();
+    return { ok: resp.ok, status: resp.status, body: body as T };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+type FeedEvent = {
+  kind: string;
+  signal_id?: string | null;
+  parent_signal_id?: string | null;
+  reaction_id?: string | null;
+  payload?: any;
+  from_username?: string | null;
+  created_at?: string;
+};
+
+type PositionRow = {
+  position_id: string;
+  signal_id: string;
+  mode?: "paper" | "live";
+  token?: string;
+  direction?: string;
+  opened_at?: string;
+};
+
+interface SetupProof {
+  signal_id: string;
+  daemon_status: string | null;
+  reaction: FeedEvent | null;
+  position: PositionRow | null;
+  elapsed_ms: number;
+}
+
+async function ensureDemoFriend(baseUrl: string, token: string): Promise<{ ok: true; status: string } | { ok: false; reason: string }> {
+  try {
+    const res = await apiJson<any>(baseUrl, token, "/friends/add", {
+      method: "POST",
+      body: JSON.stringify({ username: "@demo" }),
+    });
+    if (!res.ok) {
+      const reason = typeof res.body === "object" ? (res.body.message ?? res.body.error) : res.body;
+      return { ok: false, reason: `@demo add failed (${res.status}): ${String(reason ?? "unknown")}` };
+    }
+    return { ok: true, status: String(res.body?.status ?? "added") };
+  } catch (err) {
+    return { ok: false, reason: `@demo add failed: ${(err as Error).message}` };
+  }
+}
+
+async function triggerConnectivity(baseUrl: string, token: string): Promise<{ ok: true; signal_id: string } | { ok: false; reason: string }> {
+  try {
+    const res = await apiJson<any>(baseUrl, token, "/connectivity-test/trigger", { method: "POST" });
+    if (!res.ok || !res.body?.signal_id) {
+      const reason = typeof res.body === "object" ? (res.body.message ?? res.body.error) : res.body;
+      return { ok: false, reason: `connectivity trigger failed (${res.status}): ${String(reason ?? "unknown")}` };
+    }
+    return { ok: true, signal_id: String(res.body.signal_id) };
+  } catch (err) {
+    return { ok: false, reason: `connectivity trigger failed: ${(err as Error).message}` };
+  }
+}
+
+async function pollSetupProof(
+  baseUrl: string,
+  token: string,
+  signalId: string,
+  timeoutMs = 90_000,
+): Promise<SetupProof> {
+  const start = Date.now();
+  let daemonStatus: string | null = null;
+  while (Date.now() - start <= timeoutMs) {
+    let reaction: FeedEvent | null = null;
+    let position: PositionRow | null = null;
+
+    const daemonRes = await apiJson<any>(baseUrl, token, "/daemon/state").catch(() => null);
+    if (daemonRes?.ok) daemonStatus = String(daemonRes.body?.status ?? "unknown");
+
+    const feedRes = await apiJson<{ events?: FeedEvent[] }>(baseUrl, token, "/signals/feed?limit=80").catch(() => null);
+    const events = feedRes?.ok ? (feedRes.body.events ?? []) : [];
+    reaction = events.find((e) =>
+      e.kind === "reaction" &&
+      (e.parent_signal_id === signalId || e.signal_id === signalId)
+    ) ?? null;
+
+    const posRes = await apiJson<{ positions?: PositionRow[] }>(baseUrl, token, "/positions/mine?status=all&mode=all&limit=80").catch(() => null);
+    if (posRes?.ok) {
+      position = (posRes.body.positions ?? []).find((p) => p.signal_id === signalId) ?? null;
+    }
+
+    if (reaction) {
+      return { signal_id: signalId, daemon_status: daemonStatus, reaction, position, elapsed_ms: Date.now() - start };
+    }
+    await sleep(2_000);
+  }
+  return { signal_id: signalId, daemon_status: daemonStatus, reaction: null, position: null, elapsed_ms: Date.now() - start };
+}
+
 // ─── Output helpers ───────────────────────────────────────────────────
 
 const GREEN = "\x1b[32m";
@@ -703,18 +836,56 @@ async function cmdInstall(args: CliArgs): Promise<number> {
   ok(`daemon spawned${spawnResult.pid ? ` (pid ${spawnResult.pid})` : ""}`);
   void telemetry.stage(3, "ok", { elapsed_ms: Date.now() - stage3Start });
 
-  // ── Stage 4: confirm signal availability ────────────────────────────
-  section(4, "Verifying signal channel…");
+  // ── Stage 4: close the first loop ───────────────────────────────────
+  section(4, "Closing the first agent loop…");
+  const stage4Start = Date.now();
   void telemetry.stage(4, "running");
-  // Server-side ensureDemoFriend already pushed welcome+replay to the user's
-  // @demo channel when they registered. So as long as the daemon connects
-  // and pulls channel history, the user will see signals immediately.
-  ok(`welcome + replay signal pre-staged by backend on register`);
-  ok(`daemon will pull them via SSE history backfill on connect`);
-  void telemetry.stage(4, "ok");
+  const demoResult = await ensureDemoFriend(args.baseUrl, args.token);
+  if (!demoResult.ok) {
+    fail(demoResult.reason);
+    info(`Fix: run \`susu doctor\` after install, or add @demo manually with \`susu add @demo\`.`);
+    void telemetry.stage(4, "fail", { elapsed_ms: Date.now() - stage4Start, error_hint: demoResult.reason });
+    void telemetry.complete(false, { fail_reason: "demo_add_failed", total_elapsed_ms: Date.now() - installStart, ides_configured: configured });
+    return 1;
+  }
+  ok(`@demo connected (${demoResult.status})`);
+
+  const triggerResult = await triggerConnectivity(args.baseUrl, args.token);
+  if (!triggerResult.ok) {
+    fail(triggerResult.reason);
+    info(`Fix: run \`susu doctor\` to inspect daemon + feed state, then retry the onboarding connectivity test.`);
+    void telemetry.stage(4, "fail", { elapsed_ms: Date.now() - stage4Start, error_hint: triggerResult.reason });
+    void telemetry.complete(false, { fail_reason: "connectivity_trigger_failed", total_elapsed_ms: Date.now() - installStart, ides_configured: configured });
+    return 1;
+  }
+  ok(`connectivity signal pushed (${triggerResult.signal_id.slice(0, 8)}…)`);
+  info(`Waiting up to 90s for your daemon to receive it and your agent to react…`);
+
+  const proof = await pollSetupProof(args.baseUrl, args.token, triggerResult.signal_id);
+  if (!proof.reaction) {
+    const reason = `no agent reaction after ${(proof.elapsed_ms / 1000).toFixed(0)}s`;
+    fail(reason);
+    if (proof.daemon_status) info(`Last daemon state reported by server: ${proof.daemon_status}`);
+    info(`Fix: run \`susu doctor\`. Most common causes: runner CLI not on PATH, MCP permission missing, daemon not connected, or IDE auth expired.`);
+    void telemetry.stage(4, "timeout", { elapsed_ms: proof.elapsed_ms, error_hint: reason });
+    void telemetry.complete(false, { fail_reason: "first_loop_timeout", total_elapsed_ms: Date.now() - installStart, ides_configured: configured });
+    return 1;
+  }
+  ok(`agent reacted (${String(proof.reaction.payload?.value ?? "reaction")}) in ${(proof.elapsed_ms / 1000).toFixed(1)}s`);
+  if (proof.position) {
+    ok(`${proof.position.mode ?? "paper"} position opened: ${proof.position.token ?? "unknown"} ${proof.position.direction ?? ""}`.trim());
+  } else {
+    warn(`agent reacted but no position opened — this is valid if it rejected or sized below paper threshold`);
+  }
+  void telemetry.stage(4, "ok", {
+    elapsed_ms: proof.elapsed_ms,
+    daemon_status: proof.daemon_status ?? "unknown",
+    reaction_value: proof.reaction.payload?.value ?? null,
+    opened_position: !!proof.position,
+  });
 
   // ── Done ────────────────────────────────────────────────────────────
-  log(`\n${GREEN}${BOLD}Installation complete.${RESET}`);
+  log(`\n${GREEN}${BOLD}Setup complete. First loop verified.${RESET}`);
   log(`${BOLD}${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}`);
   log(`${BOLD}${YELLOW}  ! Quit your IDE completely (Cmd+Q / quit the app), then reopen it.${RESET}`);
   log(`${BOLD}${YELLOW}    MCP servers only load on startup. /clear or new tab will NOT work.${RESET}`);
@@ -724,6 +895,7 @@ async function cmdInstall(args: CliArgs): Promise<number> {
     warn(`Skipped: ${failed.map((f) => `${f.id} (${f.reason})`).join(", ")}`);
   }
   log(`\nReturn to https://susurration.xyz to see your dashboard light up.`);
+  log(`Proof: signal ${triggerResult.signal_id.slice(0, 8)}… → agent reaction${proof.position ? " → paper position" : ""}`);
   log(`Daemon logs:  tail -f ~/.susu/agent-decisions.jsonl`);
 
   // 2026-05-18 ADR remove-platform-paternalism — communicate the

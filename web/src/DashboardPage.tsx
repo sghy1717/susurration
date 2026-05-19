@@ -522,6 +522,12 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
   const [testSignalId, setTestSignalId] = useState<string | null>(null);
   const [testFailReason, setTestFailReason] = useState<string | null>(null);
   const [testElapsedSec, setTestElapsedSec] = useState(0);
+  const [testProof, setTestProof] = useState<{
+    signal: FeedItem | null;
+    reaction: FeedItem;
+    position: any | null;
+    elapsedSec: number;
+  } | null>(null);
   const testStartRef = useRef<number>(0);
   const testPollRef = useRef<number>(0);
   const testTickRef = useRef<number>(0);
@@ -631,6 +637,7 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
     setTestStage("pushing");
     setTestFailReason(null);
     setTestSignalId(null);
+    setTestProof(null);
     setTestElapsedSec(0);
     testStartRef.current = Date.now();
     fireOnboardingEvent("connectivity_test_click");
@@ -675,13 +682,25 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
           const feedRes = await apiFetch<{ events: FeedItem[] }>("/signals/feed?limit=30");
           const events = feedRes.events ?? [];
           // Look for any reaction by me to the test signal
-          const reacted = events.some((e) =>
+          const reaction = events.find((e) =>
             e.kind === "reaction" &&
-            e.parent_signal_id === data.signal_id
+            (e.parent_signal_id === data.signal_id || e.signal_id === data.signal_id)
           );
-          if (reacted) {
+          if (reaction) {
             if (testPollRef.current) window.clearInterval(testPollRef.current);
             if (testTickRef.current) window.clearInterval(testTickRef.current);
+            let position: any | null = null;
+            try {
+              const posRes = await apiFetch<{ positions: any[] }>("/positions/mine?status=all&mode=all&limit=50");
+              position = (posRes.positions ?? []).find((p: any) => p.signal_id === data.signal_id) ?? null;
+            } catch { /* optional proof detail */ }
+            const signal = events.find((e) => e.kind === "signal" && e.signal_id === data.signal_id) ?? null;
+            setTestProof({
+              signal,
+              reaction,
+              position,
+              elapsedSec: Math.floor(elapsedSec),
+            });
             setTestStage("success");
             fireOnboardingEvent("connectivity_test_result", { result: "success", context: { elapsed_sec: String(Math.floor(elapsedSec)) } });
           }
@@ -972,11 +991,36 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
                   <span style={{ color: "var(--green, #10b981)", fontSize: 14, fontWeight: 600 }}>✓</span>
                   <span style={{ fontSize: 12, color: "var(--green, #10b981)" }}>
-                    {lang === "zh" ? "连通正常！Agent 已完成决策。" : "Connected! Agent made a decision."}
+                    {lang === "zh" ? "连通正常。Agent 已完成决策。" : "Connected. Agent made a decision."}
                   </span>
                 </div>
-                <div style={{ fontSize: 10, color: "var(--ink-faint)" }}>
-                  {lang === "zh" ? "进入 Dashboard 后可在 Feed 流看到这条信号和你的 agent 反应；如果反应为 +1，Positions 会显示对应纸面仓位。" : "After entering Dashboard you'll see this signal and your agent reaction in Feed; if it reacted +1, Positions will show the paper position."}
+                <div style={{
+                  marginTop: 10,
+                  padding: "10px 12px",
+                  border: "1px solid rgba(16, 185, 129, 0.24)",
+                  borderRadius: 6,
+                  background: "rgba(16, 185, 129, 0.06)",
+                  fontSize: 11,
+                  color: "var(--ink-soft)",
+                  lineHeight: 1.7,
+                }}>
+                  <div style={{ fontSize: 10, color: "var(--ink-faint)", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>
+                    {lang === "zh" ? "首次闭环证明" : "First-loop proof"}
+                  </div>
+                  <div>
+                    {lang === "zh" ? "信号" : "Signal"}: <code>{(testProof?.signal?.signal_id ?? testSignalId ?? "").slice(0, 8)}…</code>
+                    {testProof?.signal?.payload?.token ? <> · <code>{testProof.signal.payload.token}</code></> : null}
+                  </div>
+                  <div>
+                    {lang === "zh" ? "Agent 反应" : "Agent reaction"}: <strong style={{ color: "var(--green, #10b981)" }}>{String(testProof?.reaction?.payload?.value ?? "reaction")}</strong>
+                    {testProof?.reaction?.payload?.note ? <> · {String(testProof.reaction.payload.note).slice(0, 80)}</> : null}
+                  </div>
+                  <div>
+                    {lang === "zh" ? "纸面仓位" : "Paper position"}: {testProof?.position
+                      ? <><strong style={{ color: "var(--green, #10b981)" }}>{lang === "zh" ? "已创建" : "opened"}</strong> · <code>{testProof.position.token}</code> {testProof.position.direction}</>
+                      : <span>{lang === "zh" ? "未创建（如果 agent 给 -1 或低仓位因子，这是正常结果）" : "not opened (normal if the agent rejected or sized below threshold)"}</span>}
+                  </div>
+                  <div>{lang === "zh" ? "耗时" : "Elapsed"}: {testProof?.elapsedSec ?? testElapsedSec}s</div>
                 </div>
               </div>
             )}
@@ -996,7 +1040,7 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
                 )}
                 <button
                   className="ob-btn-back"
-                  onClick={() => { setTestStage("idle"); setReadyAcked(false); setTestFailReason(null); }}
+                  onClick={() => { setTestStage("idle"); setReadyAcked(false); setTestFailReason(null); setTestProof(null); }}
                   style={{ fontSize: 11, padding: "6px 14px" }}
                 >
                   {lang === "zh" ? "重试" : "Retry"}
@@ -1580,6 +1624,7 @@ function DashHome() {
   // no-op. Guarded by localStorage so we only attempt once per browser.
   const selfHealedRef = useRef(false);
   useEffect(() => {
+    if (!auth.token) return;
     if (selfHealedRef.current) return;
     if (!friendsReady) return;
     if (localStorage.getItem("susu_demo_selfheal_done") === "1") return;
@@ -1600,7 +1645,7 @@ function DashHome() {
         // soft attempt window so we don't pound the endpoint every page view.
         console.warn("[demo-selfheal] add @demo failed:", err?.message);
       });
-  }, [friendsReady, friends]);
+  }, [auth.token, friendsReady, friends]);
 
   // Phase 11a — server-side paper positions (cross-device source of truth).
   // When daemon (>= v0.0.X with sync) has been pushing, this returns full
@@ -1609,6 +1654,12 @@ function DashHome() {
   const [serverPositions, setServerPositions] = useState<any[]>([]);
 
   const fetchData = useCallback(() => {
+    if (!auth.token) {
+      setFriendsReady(true);
+      setFeed([]);
+      setServerPositions([]);
+      return;
+    }
     apiFetch<{ friends: Friend[] }>("/friends").then(r => { setFriends(r.friends); setFriendsReady(true); }).catch(() => { setFriendsReady(true); });
     apiFetch<{ events: FeedItem[] }>("/signals/feed?limit=200").then(r => {
       const events = r.events ?? [];
@@ -1628,16 +1679,17 @@ function DashHome() {
     apiFetch<{ positions: any[] }>("/positions/mine?status=all")
       .then(r => setServerPositions(r.positions ?? []))
       .catch(e => console.warn("[positions/mine] fetch failed:", e.message));
-  }, []);
+  }, [auth.token, setHasNew]);
 
   useEffect(() => {
+    if (!auth.token) return;
     fetchData();
     const poll = setInterval(fetchData, 30_000);
     return () => clearInterval(poll);
-  }, [fetchData]);
+  }, [auth.token, fetchData]);
 
   const refreshPositions = useCallback(() => {
-    if (!auth.address) return;
+    if (!auth.token || !auth.address) return;
     // Phase 11a — server-side positions take precedence (cross-device truth).
     // Fallback to feed-derived for old daemons that haven't synced yet.
     //
@@ -1686,13 +1738,14 @@ function DashHome() {
         setPricesLoaded(true);
       })
       .catch(() => { setPositions(raw); setPricesLoaded(true); });
-  }, [feed, serverPositions, auth.address, persistedCloses]);
+  }, [feed, serverPositions, auth.token, auth.address, persistedCloses]);
 
   useEffect(() => {
+    if (!auth.token) return;
     refreshPositions();
     const poll = setInterval(refreshPositions, 5_000);
     return () => clearInterval(poll);
-  }, [refreshPositions]);
+  }, [auth.token, refreshPositions]);
 
   const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
   const todaySignals = feed.filter(f => f.kind === "signal" && new Date(f.created_at) >= todayStart).length;
@@ -1939,11 +1992,15 @@ function FeedPage() {
   const [activeType, setActiveType] = useState("all");
 
   useEffect(() => {
+    if (!auth.token) {
+      setLoading(false);
+      return;
+    }
     apiFetch<{ events: FeedItem[] }>("/signals/feed?limit=200")
       .then(r => setFeed(r.events ?? []))
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, []);
+  }, [auth.token]);
 
   // Phase 14 G #4 — was rebuilding all 3 Maps on every render (input typing
   // anywhere in tree triggered O(N) re-walks of feed). useMemo([feed]) caches
@@ -2289,18 +2346,27 @@ function FriendsPage() {
   }, []);
 
   const reload = useCallback(() => {
+    if (!auth.token) {
+      setFriendsLoaded(true);
+      return;
+    }
     apiFetch<{ friends: Friend[] }>("/friends").then(r => { setFriends(r.friends); setFriendsLoaded(true); if (tab === "friends" && !selected && r.friends.length) setSelected(r.friends[0]!.friend_username ?? r.friends[0]!.friend_address); }).catch(() => { setFriendsLoaded(true); });
     apiFetch<{ requests: FriendRequest[] }>("/friends/requests").then(r => setRequests(r.requests)).catch(() => {});
-  }, [selected, tab]);
+  }, [auth.token, selected, tab]);
 
   const reloadGroups = useCallback(() => {
+    if (!auth.token) return;
     apiFetch<{ groups: Group[] }>("/channels/groups").then(r => {
       setGroups(r.groups);
       if (tab === "groups" && !selectedGroup && r.groups.length) setSelectedGroup(r.groups[0]!.channel_id);
     }).catch(() => {});
-  }, [selectedGroup, tab]);
+  }, [auth.token, selectedGroup, tab]);
 
   useEffect(() => {
+    if (!auth.token) {
+      setFriendsLoaded(true);
+      return;
+    }
     reload();
     reloadGroups();
     apiFetch<{ events: FeedItem[] }>("/signals/feed?limit=200").then(r => {
@@ -2316,13 +2382,13 @@ function FriendsPage() {
         }
       }
     }).catch(() => {});
-  }, []);
+  }, [auth.token, auth.address, reload, reloadGroups]);
 
   useEffect(() => {
-    if (selectedGroup) {
+    if (auth.token && selectedGroup) {
       apiFetch<{ members: GroupMember[] }>(`/channels/${selectedGroup}/members`).then(r => setGroupMembers(r.members)).catch(() => setGroupMembers([]));
     }
-  }, [selectedGroup]);
+  }, [auth.token, selectedGroup]);
 
   const handleAdd = async (username?: string) => {
     const name = (username ?? addVal).trim().replace(/^@/, "");
@@ -2802,9 +2868,10 @@ function SettingsPage({ onShowOnboarding }: { onShowOnboarding: () => void }) {
   const [disconnectState, setDisconnectState] = useState<"idle" | "ing" | "done">("idle");
 
   useEffect(() => {
+    if (!auth.token) return;
     apiFetch("/identity/whoami").then(setWhoami).catch(() => {});
     apiFetch("/billing/allowance").then(setAllowance).catch(() => {});
-  }, []);
+  }, [auth.token]);
 
   const addrShort = auth.address ? `${auth.address.slice(0, 4)}…${auth.address.slice(-4)}` : "—";
 

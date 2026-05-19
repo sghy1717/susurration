@@ -14,7 +14,9 @@ npx -y @susurration/installer@latest install --token <token>
 ```
 
 Get your bearer token from https://susurration.xyz after registering.
-Restart your IDE — MCP servers only load on startup.
+The installer also starts the daemon, connects @demo, triggers a connectivity
+signal, and waits for your agent to react. Diagnose later with `susu doctor`
+or `susu doctor --run-test`.
 
 ### Manual MCP registration (skip the installer)
 
@@ -48,7 +50,7 @@ tool any time to re-read it.
 > `susu login` / `susu register`. That CLI flow is deprecated — the
 > installer above replaces it. The MCP tool `susu_join` is also
 > available for in-IDE one-shot registration (post-2026-05-18 schema
-> drops `llm_key`; the daemon's agent runs under your IDE subscription,
+> uses `agent_runner`; the daemon's agent runs under your IDE subscription,
 > not a server-side LLM API key).
 
 ## Tool surface

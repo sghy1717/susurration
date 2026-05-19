@@ -11,6 +11,10 @@ import { loadConfig, saveConfig, CONFIG_PATH, configDir } from "./config.ts";
 import { api, ApiError, reportClientError } from "./api.ts";
 import { generateWallet, importWallet, signMessage } from "./wallet.ts";
 import { printBanner } from "./banner.ts";
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir, platform } from "node:os";
+import { join } from "node:path";
 // Single source of truth — see code/shared/agent-doc.ts. Bun bundles this in
 // at `bun build` time, so the published bin/susu.mjs has it inlined.
 import { AGENT_DOC } from "../../shared/agent-doc.ts";
@@ -68,6 +72,8 @@ Billing
 
 Paper Trading
   susu book                                   Show paper trading positions + balance
+  susu doctor                                 Diagnose setup: token, daemon, MCP, @demo, feed, proof
+  susu doctor --run-test                      Push a connectivity signal and wait for reaction
 
 Webhook (24/7 without local daemon)
   susu webhook set <https://url>              Set webhook URL — server POSTs signals to it
@@ -140,6 +146,8 @@ async function main() {
     usage: cmdUsage,
     doc: cmdDoc,
     docs: cmdDoc, // alias — typo-tolerant
+    doctor: cmdDoctor,
+    diagnose: cmdDoctor,
     privacy: cmdPrivacy,
     webhook: cmdWebhook,
     config: cmdConfig,
@@ -1920,6 +1928,261 @@ async function cmdConfig(args: string[]): Promise<number> {
     `session:  ${s.token ? `active until ${s.token_expires_at}` : "(none — run `susu login`)"}\n` +
     `path:     ${CONFIG_PATH}\n`,
   );
+}
+
+type DoctorCheck = {
+  id: string;
+  label: string;
+  ok: boolean;
+  detail: string;
+  fix?: string;
+};
+
+function commandExistsLocal(cmd: string): boolean {
+  try {
+    const r = spawnSync(platform() === "win32" ? "where" : "which", [cmd], { stdio: "ignore" });
+    return r.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+function readJsonFileSafe(path: string): any | null {
+  try {
+    if (!existsSync(path)) return null;
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function readAgentConfig(): any | null {
+  return readJsonFileSafe(join(configDir(), "agent-config.json"));
+}
+
+function hasDoctorHomeConfig(): boolean {
+  return existsSync(join(configDir(), "agent-config.json"));
+}
+
+function hasSusurrationMcpEntry(): boolean {
+  const home = homedir();
+  const candidates = [
+    join(home, ".claude.json"),
+    join(home, ".cursor", "mcp.json"),
+    join(home, ".codeium", "windsurf", "mcp_config.json"),
+    platform() === "darwin"
+      ? join(home, "Documents", "Cline", "MCP", "cline_mcp_settings.json")
+      : join(home, ".cline", "mcp_settings.json"),
+    join(home, ".codex", "mcp_settings.json"),
+  ];
+  for (const p of candidates) {
+    try {
+      if (existsSync(p) && readFileSync(p, "utf8").includes("susurration")) return true;
+    } catch { /* ignore */ }
+  }
+  if (commandExistsLocal("claude")) {
+    const r = spawnSync("claude", ["mcp", "list"], { stdio: "pipe", encoding: "utf8", timeout: 10_000 });
+    if (`${r.stdout ?? ""}\n${r.stderr ?? ""}`.includes("susurration")) return true;
+  }
+  return false;
+}
+
+function daemonProcessLooksAlive(): boolean {
+  if (platform() === "win32") {
+    const r = spawnSync("tasklist", [], { stdio: "pipe", encoding: "utf8", timeout: 10_000 });
+    return (r.stdout ?? "").toLowerCase().includes("susu-agent-daemon")
+      || (r.stdout ?? "").toLowerCase().includes("node.exe");
+  }
+  const r = spawnSync("pgrep", ["-fl", "susu-agent-daemon"], { stdio: "pipe", encoding: "utf8", timeout: 10_000 });
+  return r.status === 0 && (r.stdout ?? "").includes("susu-agent-daemon");
+}
+
+async function doctorApi<T>(cfg: any, path: string, init?: RequestInit): Promise<{ ok: true; body: T } | { ok: false; error: string }> {
+  try {
+    const body = await api<T>(cfg, path, init ?? {});
+    return { ok: true, body };
+  } catch (e) {
+    if (e instanceof ApiError) return { ok: false, error: `${e.status} ${JSON.stringify(e.body).slice(0, 160)}` };
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
+async function waitForConnectivityProof(cfg: any, signalId: string, timeoutMs = 90_000): Promise<{ reaction: any | null; position: any | null; elapsedMs: number }> {
+  const start = Date.now();
+  while (Date.now() - start <= timeoutMs) {
+    const feed = await doctorApi<{ events?: any[] }>(cfg, "/signals/feed?limit=80");
+    const events = feed.ok ? (feed.body.events ?? []) : [];
+    const reaction = events.find((e: any) =>
+      e.kind === "reaction" && (e.parent_signal_id === signalId || e.signal_id === signalId)
+    ) ?? null;
+    const positions = await doctorApi<{ positions?: any[] }>(cfg, "/positions/mine?status=all&mode=all&limit=80");
+    const position = positions.ok
+      ? (positions.body.positions ?? []).find((p: any) => p.signal_id === signalId) ?? null
+      : null;
+    if (reaction) return { reaction, position, elapsedMs: Date.now() - start };
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+  }
+  return { reaction: null, position: null, elapsedMs: Date.now() - start };
+}
+
+async function cmdDoctor(args: string[]): Promise<number> {
+  const cfg = await loadConfig();
+  const agentCfg = readAgentConfig();
+  const apiCfg = {
+    ...cfg,
+    api_url: agentCfg?.api_url ?? cfg.api_url,
+    token: cfg.token ?? agentCfg?.token,
+  };
+  const checks: DoctorCheck[] = [];
+  const runTest = args.includes("--run-test");
+
+  checks.push({
+    id: "token",
+    label: "Bearer token",
+    ok: !!apiCfg.token,
+    detail: apiCfg.token ? "present" : "missing",
+    fix: "Run the web onboarding installer command again: npx -y @susurration/installer@latest install --token <token>",
+  });
+
+  checks.push({
+    id: "agent-config",
+    label: "Daemon config",
+    ok: !!agentCfg?.agent_runner?.command,
+    detail: agentCfg?.agent_runner?.command
+      ? `${join(configDir(), "agent-config.json")} → ${agentCfg.agent_runner.command}`
+      : `${join(configDir(), "agent-config.json")} missing agent_runner.command`,
+    fix: "Re-run: npx -y @susurration/installer@latest install --token <token>",
+  });
+
+  const runner = String(agentCfg?.agent_runner?.command ?? "");
+  checks.push({
+    id: "runner",
+    label: "IDE-agent runner",
+    ok: !!runner && commandExistsLocal(runner),
+    detail: runner ? `${runner} ${commandExistsLocal(runner) ? "on PATH" : "not on PATH"}` : "not configured",
+    fix: "Install Claude Code or set --runner-command during installer setup.",
+  });
+
+  const hasAgentConfig = hasDoctorHomeConfig();
+  const mcpFound = hasAgentConfig ? hasSusurrationMcpEntry() : false;
+  checks.push({
+    id: "mcp",
+    label: "MCP config",
+    ok: mcpFound,
+    detail: hasAgentConfig
+      ? (mcpFound ? "susurration entry found in IDE config" : "susurration MCP entry not found")
+      : `not checked because ${join(configDir(), "agent-config.json")} is missing`,
+    fix: "Re-run installer, then fully quit and reopen the IDE.",
+  });
+
+  const daemonAlive = hasAgentConfig ? daemonProcessLooksAlive() : false;
+  checks.push({
+    id: "daemon-process",
+    label: "Daemon process",
+    ok: daemonAlive,
+    detail: hasAgentConfig
+      ? (daemonAlive ? "local process found" : "no local process matched susu-agent-daemon")
+      : `not checked because ${join(configDir(), "agent-config.json")} is missing`,
+    fix: `Start it manually: susu-agent-daemon --config ${join(configDir(), "agent-config.json")}`,
+  });
+
+  if (apiCfg.token) {
+    const who = await doctorApi<any>(apiCfg, "/identity/whoami");
+    checks.push({
+      id: "server-auth",
+      label: "Server auth",
+      ok: who.ok,
+      detail: who.ok ? `@${who.body.username ?? "unregistered"}` : who.error,
+      fix: "Copy a fresh token from the dashboard and re-run installer.",
+    });
+
+    const daemon = await doctorApi<any>(apiCfg, "/daemon/state");
+    checks.push({
+      id: "daemon-sse",
+      label: "Daemon SSE",
+      ok: daemon.ok && daemon.body.status === "online",
+      detail: daemon.ok ? `server status: ${daemon.body.status}` : daemon.error,
+      fix: `Start daemon and wait for SSE ping: susu-agent-daemon --config ${join(configDir(), "agent-config.json")}`,
+    });
+
+    const friends = await doctorApi<{ friends?: any[] }>(apiCfg, "/friends");
+    const hasDemo = friends.ok && (friends.body.friends ?? []).some((f: any) => f.friend_username === "demo");
+    checks.push({
+      id: "demo",
+      label: "@demo friend",
+      ok: hasDemo,
+      detail: hasDemo ? "@demo connected" : (friends.ok ? "@demo not connected" : friends.error),
+      fix: "Run: susu add @demo",
+    });
+
+    const feed = await doctorApi<{ events?: any[] }>(apiCfg, "/signals/feed?limit=80");
+    const events = feed.ok ? (feed.body.events ?? []) : [];
+    const recentReaction = events.find((e: any) => e.kind === "reaction" && (e.payload?.value === "+1" || e.payload?.value === "-1"));
+    checks.push({
+      id: "feed",
+      label: "Feed API",
+      ok: feed.ok,
+      detail: feed.ok ? `${events.length} event(s) visible` : feed.error,
+      fix: "Check network/API URL, then retry: susu doctor",
+    });
+    checks.push({
+      id: "recent-reaction",
+      label: "Recent agent reaction",
+      ok: !!recentReaction,
+      detail: recentReaction ? `${recentReaction.payload?.value ?? "reaction"} on ${(recentReaction.parent_signal_id ?? recentReaction.signal_id ?? "").slice(0, 8)}…` : "none in recent feed",
+      fix: "Run: susu doctor --run-test",
+    });
+
+    const positions = await doctorApi<{ positions?: any[] }>(apiCfg, "/positions/mine?status=all&mode=all&limit=80");
+    checks.push({
+      id: "paper-position",
+      label: "Paper/live position record",
+      ok: positions.ok && (positions.body.positions ?? []).length > 0,
+      detail: positions.ok ? `${(positions.body.positions ?? []).length} position(s) visible` : positions.error,
+      fix: "A -1 reaction can be valid. For a full paper open proof, run: susu doctor --run-test",
+    });
+
+    if (runTest) {
+      process.stdout.write("Running connectivity proof: add @demo → push test signal → wait for reaction…\n");
+      await doctorApi(apiCfg, "/friends/add", { method: "POST", body: JSON.stringify({ username: "@demo" }) });
+      const trigger = await doctorApi<any>(apiCfg, "/connectivity-test/trigger", { method: "POST" });
+      if (!trigger.ok || !trigger.body?.signal_id) {
+        checks.push({
+          id: "run-test",
+          label: "Connectivity proof",
+          ok: false,
+          detail: trigger.ok ? "trigger returned no signal_id" : trigger.error,
+          fix: "Check @demo and backend health, then retry.",
+        });
+      } else {
+        const proof = await waitForConnectivityProof(apiCfg, trigger.body.signal_id);
+        checks.push({
+          id: "run-test",
+          label: "Connectivity proof",
+          ok: !!proof.reaction,
+          detail: proof.reaction
+            ? `signal ${trigger.body.signal_id.slice(0, 8)}… → ${proof.reaction.payload?.value ?? "reaction"} in ${(proof.elapsedMs / 1000).toFixed(1)}s${proof.position ? " → position opened" : ""}`
+            : `no reaction after ${(proof.elapsedMs / 1000).toFixed(0)}s`,
+          fix: "Check runner auth, MCP permissions, and daemon logs: tail -f ~/.susu/agent-decisions.jsonl",
+        });
+      }
+    }
+  }
+
+  if (args.includes("--json")) {
+    process.stdout.write(JSON.stringify({ ok: checks.every(c => c.ok), checks }, null, 2) + "\n");
+    return checks.every(c => c.ok) ? 0 : 1;
+  }
+
+  process.stdout.write("Susurration Setup Doctor\n\n");
+  for (const c of checks) {
+    process.stdout.write(`${c.ok ? "✓" : "✗"} ${c.label}: ${c.detail}\n`);
+    if (!c.ok && c.fix) process.stdout.write(`  fix: ${c.fix}\n`);
+  }
+  const okAll = checks.every(c => c.ok);
+  process.stdout.write(`\n${okAll ? "All checks passed." : "Some checks failed. Fix the lines above, then run `susu doctor` again."}\n`);
+  if (!runTest) process.stdout.write("For an end-to-end proof, run: susu doctor --run-test\n");
+  return okAll ? 0 : 1;
 }
 
 async function cmdBook(args: string[]): Promise<number> {

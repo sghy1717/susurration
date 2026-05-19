@@ -18,6 +18,7 @@
     "db:reset": "docker compose down -v && docker compose up -d postgres",
     "backend:dev": "bun --cwd backend dev",
     "backend:test": "bun --cwd backend test",
-    "backend:migrate": "bun --cwd backend migrate"
+    "backend:migrate": "bun --cwd backend migrate",
+    "check:onboarding-surface": "bash scripts/check-onboarding-surface.sh"
   }
 }

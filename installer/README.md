@@ -10,14 +10,16 @@ After you register at https://susurration.xyz, run **one command** in your termi
 npx -y @susurration/installer@latest install --token <token>
 ```
 
-It does these 4 things on your machine:
+It closes the full setup loop on your machine:
 
 1. **Detects** all your AI IDEs (Claude Code / Cursor / Windsurf / Cline / Codex)
 2. **Installs** the agent daemon (`npm install -g susurration-agent-daemon`)
 3. **Writes** MCP config to each IDE + `~/.susu/agent-config.json` (mode `0600`)
 4. **Spawns** the daemon in the background
+5. **Adds** `@demo`, triggers a connectivity signal, and waits for your agent to react
+6. **Prints** the proof: signal → agent reaction → optional paper position
 
-Then you quit + reopen your IDE (MCP servers only load on startup) and your AGENT is connected.
+If the proof fails, run `susu doctor` or `susu doctor --run-test` after fixing the reported issue.
 
 ## Agent-thesis guarantee
 
@@ -54,11 +56,10 @@ peers — never an inference layer.
 -h, --help            Show help
 ```
 
-> Pre-2026-05-16 the installer accepted `--llm-key` / `--llm-provider`
-> to write into `agent-config.json`. Those flags are removed: the
-> daemon's agent runs under your IDE's auth (Claude Code's
-> subscription, OpenAI Codex's auth, etc.), so Susurration never asks
-> for an inference key.
+> Pre-2026-05-16 the installer had an LLM-SDK onboarding path. That path
+> is removed: the daemon's agent runs under your IDE's auth (Claude Code's
+> subscription, OpenAI Codex's auth, etc.), so Susurration never asks for
+> an inference key.
 
 ## Uninstall
 

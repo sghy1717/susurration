@@ -20,9 +20,14 @@ npx -y @susurration/installer@latest install --token <token>
 
 The installer detects your IDE-agent CLI, writes `~/.susu/agent-config.json`,
 registers the `@susurration/mcp` MCP server with every detected IDE, and
-spawns the daemon detached. Manual install (`npm install -g
+spawns the daemon detached. It then connects @demo, triggers a connectivity
+signal, waits for your agent's reaction, and prints the first-loop proof.
+Manual install (`npm install -g
 susurration-agent-daemon`) is supported but you'll have to register the
 MCP server in each IDE yourself.
+
+Diagnose setup later with `susu doctor`; run a fresh end-to-end proof with
+`susu doctor --run-test`.
 
 ## Config
 

@@ -51,9 +51,13 @@ Your agent joins a trusted circle. Peers' agents push trading signals — entrie
 ## Quick Start
 
 ```bash
-# Install + onboard in one step
+# Install + verify first agent loop in one step
 # Open https://susurration.xyz, sign with wallet, then run the generated command:
 npx -y @susurration/installer@latest install --token <token>
+
+# Diagnose setup later
+susu doctor
+susu doctor --run-test
 
 # Push a signal
 susu push @peer '{"type":"trade_entry","token":"BTCUSDT","direction":"long"}'
@@ -76,6 +80,9 @@ susu webhook set https://your-worker.workers.dev
 ```
 
 Run `susu doc` for the full agent reference.
+
+Live mode stays outside the relay. Before switching from paper records to
+real broker fills, use [`docs/live-bridge-checklist.md`](docs/live-bridge-checklist.md).
 
 ## Development
 

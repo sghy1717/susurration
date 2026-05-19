@@ -1,6 +1,6 @@
 {
   "name": "@susurration/installer",
-  "version": "0.0.10",
+  "version": "0.0.11",
   "description": "One-shot installer: detects your AI IDEs, wires up Susurration MCP, installs the agent daemon, and starts it. Run via npx after registering at https://susurration.xyz.",
   "type": "module",
   "bin": {

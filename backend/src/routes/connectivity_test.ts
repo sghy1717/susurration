@@ -3,21 +3,22 @@
 // Onboarding now gates Enter Dashboard on a successful agent loop:
 //   1. user clicks "Test connectivity" in Step 3 (after installer ran)
 //   2. web POSTs /connectivity-test/trigger
-//   3. server pushes a real trade_entry signal (replay of @demo's most-recent)
-//      into the user's @demo channel with `connectivity_test: true` flag
-//   4. user's daemon receives via SSE → LLM evaluates → react +1
+//   3. server pushes a trade_entry-shaped signal into the user's @demo channel
+//      with `connectivity_test: true` flag. Prefer replaying @demo's most
+//      recent real signal; fall back to a deterministic test payload so setup
+//      does not block when the scanner has been quiet.
+//   4. user's daemon receives via SSE → local agent evaluates → react +1/-1
 //   5. web polls /signals/feed; detects the react → unlocks Enter Dashboard
 //
-// Why a real trade_entry (not a synthetic ping)?
+// Why a trade_entry-shaped signal (not a synthetic ping)?
 //   The signal flows the entire production pipeline: SSE delivery →
-//   daemon LLM eval → react push → paper trade entry. If anything is
-//   broken (LLM key bad, daemon not running, daemon out of credit, etc.)
-//   the loop fails and the user can't enter Dashboard. That's the point.
+//   daemon agent eval → react push → paper trade entry. If anything is
+//   broken (agent runner missing, daemon not running, MCP permission denied,
+//   etc.) the loop fails and the user can't enter Dashboard. That's the point.
 //
-// Why a replay (vs new market data)?
-//   - Zero extra dependencies (no live Binance fetch)
-//   - Daemon treats it exactly like a real signal (no special-casing)
-//   - Replay payload is real-shape; daemon LLM produces real decision
+// Why fallback payload?
+//   @demo is still the activation funnel. But a setup test must be available
+//   on demand; "no recent scanner signal" is not a user-actionable failure.
 
 import { Hono } from "hono";
 import { sql } from "../db.ts";
@@ -84,17 +85,27 @@ connectivityTestRoutes.post("/connectivity-test/trigger", async (c) => {
     ORDER BY created_at DESC
     LIMIT 1
   `;
-  if (!candidate[0]) {
-    return c.json({
-      error: "no_recent_signal",
-      message: `@demo has no real trade signal in the last ${REPLAY_LOOKBACK_HOURS}h — try again later or contact support`,
-    }, 503);
-  }
-  const original = candidate[0].payload;
+  const original = candidate[0]?.payload ?? {
+    type: "trade_entry",
+    source_id: "demo-connectivity-test",
+    token: "ETHUSDT",
+    direction: "long",
+    confidence: 0.55,
+    horizon: "connectivity_test",
+    reason:
+      "Connectivity test payload. This is not alpha; it exists to prove your daemon can receive, evaluate, react, and optionally open paper.",
+    metadata: {
+      entry_price: 3500,
+      stop_loss: 3400,
+      take_profit: 3700,
+      leverage: 1,
+      time_stop_hours: 1,
+    },
+  };
   const testPayload = stripControlCharsDeep({
     ...original,
     connectivity_test: true,
-    connectivity_test_of_signal_id: candidate[0].signal_id,
+    connectivity_test_of_signal_id: candidate[0]?.signal_id ?? null,
     connectivity_test_at: new Date().toISOString(),
     connectivity_test_note:
       "Connectivity test — your agent should evaluate this signal and react. " +
