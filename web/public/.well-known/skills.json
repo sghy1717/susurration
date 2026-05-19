@@ -36,11 +36,11 @@
     }
   ],
   "mcp": {
-    "install": { "command": "npx", "args": ["-y", "@susurration/mcp"] },
+    "install": { "command": "npx", "args": ["-y", "@susurration/mcp@latest"] },
     "config_url": "https://susurration.xyz/.well-known/mcp.json"
   },
   "cli": {
     "install": "npm install -g susurration",
-    "quick_start": "npx -y @susurration/installer install"
+    "quick_start": "npx -y @susurration/installer@latest install --token <token>"
   }
 }

@@ -5,10 +5,10 @@
 import { useEffect, useState } from "react";
 import { Shell } from "./Shell";
 import {
-  useFriends, usePendingRequests, useChannelGroups, usePeerDetail,
+  useFriends, usePendingRequests, useOutgoingRequests, useChannelGroups, usePeerDetail,
   useChannelDetail, useChannelMembers, useChannelStats,
   formatPnl, formatPercent,
-  type Friend, type PendingRequest, type ChannelGroup,
+  type Friend, type PendingRequest, type OutgoingRequest, type ChannelGroup,
 } from "./hooks";
 import { api } from "../api";
 import {
@@ -33,11 +33,14 @@ export function FriendsPage() {
 
   const { data: friendsResp, refetch: refetchFriends } = useFriends();
   const { data: pendingResp, refetch: refetchPending } = usePendingRequests();
-  const { data: channelsResp } = useChannelGroups();
+  const { data: outgoingResp, refetch: refetchOutgoing } = useOutgoingRequests();
+  const { data: channelsResp, refetch: refetchChannels } = useChannelGroups();
 
   const friends = friendsResp?.friends ?? [];
   const pending = pendingResp?.requests ?? [];
+  const outgoing = outgoingResp?.requests ?? [];
   const channels = channelsResp?.groups ?? [];
+  const pendingTotal = pending.length + outgoing.length;
 
   // Default selection: first friend when on the friends tab + nothing
   // selected. Switching to channels tab keeps the user's existing
@@ -52,7 +55,7 @@ export function FriendsPage() {
     <Shell
       pageLabel="v2.page.friends"
       topbarAux={
-        <span>{t("v2.friends.topbar", { f: friends.length, c: channels.length })}{pending.length > 0 ? t("v2.friends.topbar.pending", { n: pending.length }) : ""}</span>
+        <span>{t("v2.friends.topbar", { f: friends.length, c: channels.length })}{pendingTotal > 0 ? t("v2.friends.topbar.pending", { n: pendingTotal }) : ""}</span>
       }
     >
       <div style={{ marginBottom: "var(--susu-s-5)" }}>
@@ -66,11 +69,11 @@ export function FriendsPage() {
       <div className="susu-grid-sidebar">
         <LeftRail
           tab={tab} setTab={setTab}
-          friends={friends} pending={pending} channels={channels}
-          counts={{ friends: friends.length, channels: channels.length, pending: pending.length }}
+          friends={friends} pending={pending} outgoing={outgoing} channels={channels}
+          counts={{ friends: friends.length, channels: channels.length, pending: pendingTotal }}
           selection={selection}
           onSelect={setSelection}
-          onChange={() => { refetchFriends(); refetchPending(); }}
+          onChange={() => { refetchFriends(); refetchPending(); refetchOutgoing(); refetchChannels(); }}
         />
         <DetailPanel selection={selection} channels={channels} />
       </div>
@@ -79,12 +82,13 @@ export function FriendsPage() {
 }
 
 function LeftRail({
-  tab, setTab, friends, pending, channels, counts, selection, onSelect, onChange,
+  tab, setTab, friends, pending, outgoing, channels, counts, selection, onSelect, onChange,
 }: {
   tab: LeftTab;
   setTab: (t: LeftTab) => void;
   friends: Friend[];
   pending: PendingRequest[];
+  outgoing: OutgoingRequest[];
   channels: ChannelGroup[];
   counts: { friends: number; channels: number; pending: number };
   selection: Selection;
@@ -107,6 +111,21 @@ function LeftRail({
         {tab === "friends" && (
           <>
             <AddFriendInput onAdded={onChange} />
+            {outgoing.length > 0 && (
+              <div style={{ marginBottom: "var(--susu-s-3)" }}>
+                <div style={{
+                  fontFamily: "var(--susu-mono)",
+                  fontSize: 10,
+                  color: "var(--susu-ink-subtle)",
+                  letterSpacing: "0.08em",
+                  textTransform: "uppercase",
+                  margin: "0 0 var(--susu-s-2) var(--susu-s-1)",
+                }}>
+                  {t("v2.friends.outgoing.title")}
+                </div>
+                {outgoing.map(req => <OutgoingRow key={req.request_id} req={req} />)}
+              </div>
+            )}
             {friends.length === 0 ? (
               <div style={{ color: "var(--susu-ink-subtle)", padding: "var(--susu-s-4)", fontSize: 13 }}>
                 {t("v2.friends.empty.friends")}
@@ -155,13 +174,24 @@ function LeftRail({
         )}
 
         {tab === "pending" && (
-          pending.length === 0 ? (
+          pending.length === 0 && outgoing.length === 0 ? (
             <div style={{ color: "var(--susu-ink-subtle)", padding: "var(--susu-s-4)", fontSize: 13 }}>
               {t("v2.friends.empty.pending")}
             </div>
-          ) : pending.map(p => (
-            <PendingRow key={p.request_id} req={p} onAccepted={onChange} />
-          ))
+          ) : (
+            <>
+              {pending.length > 0 && (
+                <PendingSectionTitle>{t("v2.friends.incoming.title")}</PendingSectionTitle>
+              )}
+              {pending.map(p => (
+                <PendingRow key={p.request_id} req={p} onAccepted={onChange} />
+              ))}
+              {outgoing.length > 0 && (
+                <PendingSectionTitle>{t("v2.friends.outgoing.title")}</PendingSectionTitle>
+              )}
+              {outgoing.map(req => <OutgoingRow key={req.request_id} req={req} />)}
+            </>
+          )
         )}
       </div>
     </div>
@@ -191,6 +221,21 @@ function Count({ children }: { children: React.ReactNode }) {
   return <span style={{ marginLeft: 4, color: "var(--susu-ink-faint)" }}>{children}</span>;
 }
 
+function PendingSectionTitle({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{
+      fontFamily: "var(--susu-mono)",
+      fontSize: 10,
+      color: "var(--susu-ink-subtle)",
+      letterSpacing: "0.08em",
+      textTransform: "uppercase",
+      margin: "var(--susu-s-3) 0 var(--susu-s-2) var(--susu-s-1)",
+    }}>
+      {children}
+    </div>
+  );
+}
+
 function FriendRow({ friend, selected, onClick }: { friend: Friend; selected: boolean; onClick: () => void }) {
   const { t } = useLang();
   return (
@@ -214,6 +259,34 @@ function FriendRow({ friend, selected, onClick }: { friend: Friend; selected: bo
           {t("v2.friends.added", { ago: formatRelative(friend.created_at) })}
         </div>
       </div>
+    </div>
+  );
+}
+
+function OutgoingRow({ req }: { req: OutgoingRequest }) {
+  const { t } = useLang();
+  const handle = req.to_username ? `@${req.to_username}` : `${req.to_addr.slice(0, 6)}…`;
+  return (
+    <div style={{
+      display: "flex",
+      alignItems: "center",
+      gap: "var(--susu-s-3)",
+      padding: "var(--susu-s-3)",
+      borderRadius: "var(--susu-r-sm)",
+      background: "rgba(251, 191, 36, 0.06)",
+      border: "1px solid rgba(251, 191, 36, 0.16)",
+      marginBottom: 2,
+    }}>
+      <Avatar seed={req.to_username ?? req.to_addr} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div className="susu-mono" style={{ fontSize: 13, color: "var(--susu-ink)" }}>
+          {handle}
+        </div>
+        <div style={{ fontSize: 11, color: "var(--susu-ink-subtle)", fontFamily: "var(--susu-mono)" }}>
+          {t("v2.friends.outgoing.waiting", { ago: formatRelative(req.created_at) })}
+        </div>
+      </div>
+      <Tag kind="neutral">{t("v2.friends.outgoing.badge")}</Tag>
     </div>
   );
 }
@@ -261,14 +334,28 @@ function AddFriendInput({ onAdded }: { onAdded: () => void }) {
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ tone: "ok" | "pending"; text: string } | null>(null);
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!name.trim() || busy) return;
-    setBusy(true); setErr(null);
+    setBusy(true); setErr(null); setNotice(null);
     try {
       const clean = name.trim().replace(/^@/, "");
-      await api({ method: "POST", path: "/friends/add", body: { username: clean } });
+      const result = await api<{
+        status: "added" | "already_friends" | "pending";
+        request_id?: string;
+        channel_id?: string;
+        target?: { address: string; username: string | null };
+      }>({ method: "POST", path: "/friends/add", body: { username: clean } });
       setName("");
+      const handle = result.target?.username ? `@${result.target.username}` : `@${clean}`;
+      if (result.status === "pending") {
+        setNotice({ tone: "pending", text: t("v2.friends.add.sentPending", { handle }) });
+      } else if (result.status === "already_friends") {
+        setNotice({ tone: "ok", text: t("v2.friends.add.already", { handle }) });
+      } else {
+        setNotice({ tone: "ok", text: t("v2.friends.add.added", { handle }) });
+      }
       onAdded();
     } catch (e: any) {
       setErr(e?.body?.error ?? String(e));
@@ -300,8 +387,20 @@ function AddFriendInput({ onAdded }: { onAdded: () => void }) {
           {busy ? t("v2.friends.btn.busy") : t("v2.friends.add.btn")}
         </button>
       </div>
-      <div style={{ fontSize: 11, color: err ? "var(--susu-neg)" : "var(--susu-ink-faint)", marginTop: 6, fontFamily: "var(--susu-mono)" }}>
-        {err ?? t("v2.friends.add.help")}
+      <div style={{
+        fontSize: 11,
+        color: err
+          ? "var(--susu-neg)"
+          : notice?.tone === "ok"
+            ? "var(--susu-pos)"
+            : notice?.tone === "pending"
+              ? "var(--susu-warn)"
+              : "var(--susu-ink-faint)",
+        marginTop: 6,
+        fontFamily: "var(--susu-mono)",
+        lineHeight: 1.5,
+      }}>
+        {err ?? notice?.text ?? t("v2.friends.add.help")}
       </div>
     </form>
   );

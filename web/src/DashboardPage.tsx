@@ -115,7 +115,7 @@ function mcpJson(token: string) {
   "mcpServers": {
     "susurration": {
       "command": "npx",
-      "args": ["-y", "@susurration/mcp"],
+      "args": ["-y", "@susurration/mcp@latest"],
       "env": {
         "SUSU_TOKEN": "${token}"
       }
@@ -363,7 +363,7 @@ function applyPrices(
 }
 
 function validateHandle(v: string) {
-  return v.length >= 5 && v.length <= 20 && /^[a-z0-9_-]+$/.test(v);
+  return v.length >= 5 && v.length <= 20 && /^[a-z0-9][a-z0-9_-]*$/.test(v);
 }
 
 function McpJsonPre({ token }: { token: string }) {
@@ -373,7 +373,7 @@ function McpJsonPre({ token }: { token: string }) {
       <span className="tok-key">"mcpServers"</span><span className="tok-punct">{": {"}</span>{"\n    "}
       <span className="tok-key">"susurration"</span><span className="tok-punct">{": {"}</span>{"\n      "}
       <span className="tok-key">"command"</span><span className="tok-punct">:</span>{" "}<span className="tok-str">"npx"</span><span className="tok-punct">,</span>{"\n      "}
-      <span className="tok-key">"args"</span><span className="tok-punct">:</span>{" ["}<span className="tok-str">"-y"</span><span className="tok-punct">,</span>{" "}<span className="tok-str">"@susurration/mcp"</span><span className="tok-punct">],</span>{"\n      "}
+      <span className="tok-key">"args"</span><span className="tok-punct">:</span>{" ["}<span className="tok-str">"-y"</span><span className="tok-punct">,</span>{" "}<span className="tok-str">"@susurration/mcp@latest"</span><span className="tok-punct">],</span>{"\n      "}
       <span className="tok-key">"env"</span><span className="tok-punct">{": {"}</span>{"\n        "}
       <span className="tok-key">"SUSU_TOKEN"</span><span className="tok-punct">:</span>{" "}<span className="tok-str">"{maskToken(token)}"</span>{"\n      "}
       <span className="tok-punct">{"}"}</span>{"\n    "}
@@ -656,7 +656,9 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
         setTestElapsedSec(sec);
       }, 1000);
 
-      // Poll feed every 2s for daemon's reaction to the test signal
+      // Poll feed every 2s for daemon's reaction to the test signal. Any
+      // reaction proves the local agent path is alive; a valid -1 risk
+      // decision must not block Dashboard entry.
       testPollRef.current = window.setInterval(async () => {
         const elapsedSec = (Date.now() - testStartRef.current) / 1000;
         if (elapsedSec > TEST_TIMEOUT_SEC) {
@@ -672,11 +674,10 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
         try {
           const feedRes = await apiFetch<{ events: FeedItem[] }>("/signals/feed?limit=30");
           const events = feedRes.events ?? [];
-          // Look for a +1 reaction by me to the test signal
+          // Look for any reaction by me to the test signal
           const reacted = events.some((e) =>
             e.kind === "reaction" &&
-            e.parent_signal_id === data.signal_id &&
-            e.payload?.value === "+1"
+            e.parent_signal_id === data.signal_id
           );
           if (reacted) {
             if (testPollRef.current) window.clearInterval(testPollRef.current);
@@ -811,12 +812,12 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
             <ul style={{ listStyle: "none", padding: 0, margin: 0, fontSize: 12, lineHeight: 1.8 }}>
               <li>✓ {lang === "zh" ? "钱包已签名" : "Wallet signed"} <span style={{ color: "var(--green)" }}>✓</span></li>
               <li>
-                {lang === "zh" ? "已装 AI IDE 的 CLI：" : "An AI IDE with a CLI: "}
-                Claude Code <span style={{ color: "var(--ink-faint)" }}> {lang === "zh" ? "或" : "or"} </span>Codex CLI
+                {lang === "zh" ? "已装 Claude Code CLI：" : "Claude Code CLI installed: "}
+                <code>claude</code>
                 <div style={{ fontSize: 10, color: "var(--ink-faint)", marginTop: 2 }}>
                   {lang === "zh"
-                    ? "Susurration 把每条信号交给你本地的 agent 来决策。它带着你的 CLAUDE.md、MCP servers、skills、记忆 — 这才是 你的 agent，不是裸大模型。不需要单独的 LLM API key。"
-                    : "Susurration delegates every signal to your local agent — running with your CLAUDE.md, MCP servers, skills, memory. That's YOUR agent, not a naked LLM. No separate API key needed."}
+                    ? "当前稳定路径是 Claude Code。Susurration 把每条信号交给你本地的 agent 来决策：它带着你的 CLAUDE.md、MCP servers、skills、记忆，不需要单独的 LLM API key。"
+                    : "The stable path today is Claude Code. Susurration delegates every signal to your local agent with your CLAUDE.md, MCP servers, skills, and memory. No separate API key needed."}
                 </div>
               </li>
             </ul>
@@ -830,15 +831,15 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
             <div className="d-code-block-label">
               <span>{lang === "zh" ? "在你的终端跑这一行" : "Run this in your terminal"}</span>
               <CopyBtn
-                text={` npx -y @susurration/installer install --token ${authToken || "sk_live_YOUR_TOKEN"}`}
+                text={` npx -y @susurration/installer@latest install --token ${authToken || "<token>"}`}
                 className="copy-prominent"
               />
             </div>
             <pre style={{ whiteSpace: "pre-wrap", fontSize: 12, lineHeight: 1.7 }}>
               <span className="tok-key">{" "}npx</span>
               {" "}
-              <span className="tok-str">-y @susurration/installer install --token </span>
-              <span className="tok-num">{maskToken(authToken || "sk_live_YOUR_TOKEN")}</span>
+              <span className="tok-str">-y @susurration/installer@latest install --token </span>
+              <span className="tok-num">{authToken ? maskToken(authToken) : "<token>"}</span>
             </pre>
           </div>
           <div style={{ fontSize: 10, color: "var(--ink-faint)", marginBottom: 16, lineHeight: 1.6 }}>
@@ -883,8 +884,8 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
             </div>
             <div style={{ fontSize: 11, color: "var(--ink-faint)", lineHeight: 1.7, marginBottom: 12 }}>
               {lang === "zh"
-                ? "点击下方按钮，我们会推一条真实的测试信号给你的 agent。只有你的 agent 收到、评估、并 react +1（自动开仓），下方「进入 Dashboard」按钮才会解锁。"
-                : "Click below to push a real test signal to your agent. Enter Dashboard unlocks only after your agent receives → evaluates → reacts +1 (auto-opens a paper position)."
+                ? "点击下方按钮，我们会推一条真实的测试信号给你的 agent。只要你的 agent 收到、评估、并给出 +1 或 -1 反应，下方「进入 Dashboard」按钮就会解锁。"
+                : "Click below to push a real test signal to your agent. Enter Dashboard unlocks once your agent receives → evaluates → reacts +1 or -1."
               }
             </div>
 
@@ -971,11 +972,11 @@ function Onboarding({ onComplete }: { onComplete: () => void }) {
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
                   <span style={{ color: "var(--green, #10b981)", fontSize: 14, fontWeight: 600 }}>✓</span>
                   <span style={{ fontSize: 12, color: "var(--green, #10b981)" }}>
-                    {lang === "zh" ? "连通正常！Agent 已开仓。" : "Connected! Agent opened a position."}
+                    {lang === "zh" ? "连通正常！Agent 已完成决策。" : "Connected! Agent made a decision."}
                   </span>
                 </div>
                 <div style={{ fontSize: 10, color: "var(--ink-faint)" }}>
-                  {lang === "zh" ? "进入 Dashboard 后可在 Feed 流看到这条信号 + Positions 看到这笔仓位。" : "After entering Dashboard you'll see this signal in Feed + the position in Positions."}
+                  {lang === "zh" ? "进入 Dashboard 后可在 Feed 流看到这条信号和你的 agent 反应；如果反应为 +1，Positions 会显示对应纸面仓位。" : "After entering Dashboard you'll see this signal and your agent reaction in Feed; if it reacted +1, Positions will show the paper position."}
                 </div>
               </div>
             )}
@@ -1103,7 +1104,7 @@ function UpgradeBanner() {
   const showBanner = !dismissed && needsUpgrade;
   if (!showBanner) return null;
 
-  const installerCmd = ` npx -y @susurration/installer install --token ${auth.token ?? "sk_live_YOUR_TOKEN"}`;
+  const installerCmd = ` npx -y @susurration/installer@latest install --token ${auth.token ?? "<token>"}`;
 
   // Copy-command fallback. Used when daemon localhost probe fails or one-
   // click upgrade can't proceed (different machine, daemon stopped, older

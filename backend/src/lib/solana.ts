@@ -322,6 +322,7 @@ export function validateSolanaConfig(args: {
   rpcUrl: string;
   usdcMint: string;
   allowMintOverride?: boolean;
+  allowOverride?: boolean;
   allowRpcHostnameMismatch?: boolean;
 }): void {
   const known = KNOWN_MINTS[args.cluster];
@@ -332,7 +333,7 @@ export function validateSolanaConfig(args: {
     );
   }
   if (args.usdcMint !== known.mint) {
-    if (!args.allowMintOverride) {
+    if (!args.allowMintOverride && !args.allowOverride) {
       throw new ClusterMismatchError(
         `SUSU_USDC_MINT=${args.usdcMint} but cluster=${args.cluster} expects ${known.mint}. ` +
         `If this is intentional (local mock USDC), set SUSU_ALLOW_MINT_OVERRIDE=1.`,

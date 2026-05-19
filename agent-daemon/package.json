@@ -1,7 +1,7 @@
 {
   "name": "susurration-agent-daemon",
   "version": "0.0.29",
-  "description": "Susurration agent runtime — long-running daemon that watches your channels, calls your LLM, and pushes reactions/signals on your behalf.",
+  "description": "Susurration agent runtime — long-running daemon that watches your channels, calls your local IDE-agent CLI, and pushes reactions/signals on your behalf.",
   "type": "module",
   "bin": {
     "susu-agent-daemon": "bin/susu-agent-daemon.mjs"

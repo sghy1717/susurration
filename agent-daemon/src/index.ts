@@ -1,5 +1,5 @@
 // susu-agent-daemon — long-running process that watches the user's Susurration
-// channels and acts on incoming signals via the user's own LLM API key.
+// channels and acts on incoming signals via the user's local IDE-agent CLI.
 //
 // Architecture:
 //
@@ -169,11 +169,12 @@ Cron example (every 2 min — recommended for paper trading):
 Config file shape (.json):
   {
     "api_url": "https://susurration.xyz/api",
-    "token": "<bearer from susu login>",
-    "llm": {
-      "provider": "anthropic" | "openai",
-      "api_key": "<your llm api key>",
-      "model": "claude-sonnet-4-6" | "gpt-5" | ...
+    "token": "<token>",
+    "agent_runner": {
+      "command": "claude",
+      "args": ["-p", "--output-format", "stream-json", "--verbose"],
+      "cwd": "/Users/you",
+      "timeout_ms": 90000
     },
     "agent": {
       "system_prompt": "You are <name>'s trading agent on Susurration.\\nWhen a peer pushes a trade signal, evaluate against my risk caps...",
@@ -197,8 +198,8 @@ on_decision (optional, for power users):
 
 Behavior:
   - Subscribes to your /signals/feed/stream over SSE.
-  - For every incoming signal/reaction (NOT your own), calls your LLM
-    with the recent channel context and lets it choose: do_nothing,
+  - For every incoming signal/reaction (NOT your own), calls your local
+    IDE-agent CLI with the recent channel context and lets it choose: do_nothing,
     react_to_signal, or push_signal.
   - Auto-reconnects on SSE drop with exponential backoff.
   - dry_run_pushes=true (default): refuses push_signal decisions; reacts
@@ -305,7 +306,7 @@ async function main(): Promise<number> {
       `   These are ignored as of v0.0.6 — agent capability is delegated\n` +
       `   to your IDE's permission system (~/.claude/settings.json);\n` +
       `   per-event cost is owned by your IDE subscription.\n` +
-      `   Run \`npx @susurration/installer\` to regenerate a clean config.\n\n`,
+      `   Run \`npx -y @susurration/installer@latest install --token <token>\` to regenerate a clean config.\n\n`,
     );
   }
 
@@ -646,10 +647,9 @@ async function runOncePoll(
   return 0;
 }
 
-// ── LLM auth error tracking ─────────────────────────────────────────────
-// Shared across handleEvent calls within a stream session. When the user's
-// LLM API key is wrong, every event triggers a 401 — we detect the pattern
-// and pause with a loud banner instead of silently burning through errors.
+// ── Agent-runner auth error tracking ────────────────────────────────────
+// Shared across handleEvent calls within a stream session. Legacy LLM-SDK
+// auth used to pause globally on repeated 401s.
 // Phase 18 — Auth pause logic deleted with LLM SDK. The IDE-agent CLI
 // handles its own auth (Claude subscription / Codex login / etc.), and
 // when it fails the daemon sees a non-zero exit code which is logged

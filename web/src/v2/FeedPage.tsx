@@ -11,6 +11,7 @@ import {
 import {
   Eyebrow, Tag, formatClock, formatRelative,
 } from "./components";
+import { ownReactionsBySignalId } from "./feedModel";
 import { useLang } from "../i18n";
 
 // 2026-05-18 ADR remove-platform-paternalism follow-up (A) — feed flow is
@@ -90,14 +91,7 @@ export function FeedPage() {
   // verdict ACCEPT / REJECT / NO_REACT). Multiple peers may react on the
   // same signal — we want the viewer's own verdict, not anyone else's.
   const myReactionsBySignalId = useMemo(() => {
-    const m = new Map<string, FeedItem>();
-    if (!myAddress) return m;
-    for (const e of events) {
-      if (e.kind === "reaction" && e.from_address === myAddress && e.signal_id) {
-        m.set(e.signal_id, e);
-      }
-    }
-    return m;
+    return ownReactionsBySignalId(events, myAddress);
   }, [events, myAddress]);
 
   // 2026-05-18 Haze ask — feed row right column shows the position size
@@ -123,7 +117,7 @@ export function FeedPage() {
     const ts = Math.floor(new Date(e.created_at).getTime() / 2000);
     const token = e.payload?.token ?? e.payload?.symbol ?? "";
     const direction = e.payload?.direction ?? e.payload?.side ?? "";
-    return `${e.from_address}|${token}|${direction}|${ts}`;
+    return `${e.from_address ?? ""}|${token}|${direction}|${ts}`;
   };
 
   // #2: aggregate channels per fanout-key (NOT signal_id — see above).
@@ -136,7 +130,7 @@ export function FeedPage() {
         const arr = m.get(k) ?? [];
         const chKey = `${e.channel_name ?? ""}|${e.is_group ?? false}`;
         if (!arr.some(c => `${c.name ?? ""}|${c.is_group}` === chKey)) {
-          arr.push({ name: e.channel_name, is_group: e.is_group ?? false });
+          arr.push({ name: e.channel_name ?? null, is_group: e.is_group ?? false });
         }
         m.set(k, arr);
       }
@@ -161,8 +155,8 @@ export function FeedPage() {
   const byPeer = useMemo(() => {
     const m = new Map<string, { username: string | null; count: number }>();
     for (const e of recent24h) {
-      const key = e.from_username ?? e.from_address;
-      const cur = m.get(key) ?? { username: e.from_username, count: 0 };
+      const key = e.from_username ?? e.from_address ?? "system";
+      const cur = m.get(key) ?? { username: e.from_username ?? null, count: 0 };
       cur.count += 1;
       m.set(key, cur);
     }
@@ -291,7 +285,11 @@ function FeedRow({
   const isClose = ev.kind === "close" || ev.kind === "close_paper";
   const isOpen = ev.kind === "open" || ev.kind === "open_paper";
 
-  const handle = ev.from_username ? `@${ev.from_username}` : `${ev.from_address.slice(0, 6)}…`;
+  const handle = ev.from_username
+    ? `@${ev.from_username}`
+    : ev.from_address
+      ? `${ev.from_address.slice(0, 6)}…`
+      : "system";
 
   // 2026-05-18 H review (#2 + 漏 #3) — when the same signal_id fans out
   // to multiple channels, FeedPage aggregates them in `channels` and we
@@ -300,7 +298,7 @@ function FeedRow({
   const channelList: Array<{ name: string | null; is_group: boolean }> =
     isSignal && channels && channels.length > 0
       ? channels
-      : [{ name: ev.channel_name, is_group: ev.is_group ?? false }];
+      : [{ name: ev.channel_name ?? null, is_group: ev.is_group ?? false }];
 
   const tag = isSignal ? <Tag kind={side === "short" ? "short" : "long"}>SIGNAL · {(side ?? "?").toUpperCase()}</Tag>
             : isClose ? <Tag kind={ev.payload?.exit_pnl_usd >= 0 ? "long" : "short"}>CLOSED · {ev.payload?.exit_reason ?? "—"}</Tag>

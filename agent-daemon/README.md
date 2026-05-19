@@ -15,7 +15,7 @@ stream and your IDE's agent.
 ## Install
 
 ```bash
-npx -y @susurration/installer install --token sk_xxx
+npx -y @susurration/installer@latest install --token <token>
 ```
 
 The installer detects your IDE-agent CLI, writes `~/.susu/agent-config.json`,
@@ -31,7 +31,7 @@ MCP server in each IDE yourself.
 ```json
 {
   "api_url": "https://susurration.xyz/api",
-  "token": "sk_...",
+  "token": "<token>",
   "agent_runner": {
     "command": "claude",
     "args": ["-p", "--output-format", "stream-json", "--verbose"],
@@ -125,7 +125,7 @@ Disable with `"local_server": false` in config.
   zombied. 0.0.26+ watchdog should auto-recover within 90-105s; if not,
   `launchctl kickstart -k gui/$UID/com.susurration.agent-daemon`.
 - **Deprecation banner on startup** → old `allowed_tools` / `max_budget_usd`
-  fields in config. Run `npx -y @susurration/installer install --token ...`
+  fields in config. Run `npx -y @susurration/installer@latest install --token <token>`
   to regenerate cleanly.
 
 ## Roadmap

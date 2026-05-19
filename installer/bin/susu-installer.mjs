@@ -5,9 +5,20 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, renameSync, unlinkSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 var DEFAULT_BASE_URL = "https://susurration.xyz/api";
 var DAEMON_NPM_NAME = "susurration-agent-daemon";
 var MCP_NPM_NAME = "@susurration/mcp";
+var MCP_NPX_SPEC = `${MCP_NPM_NAME}@latest`;
+var PKG_VERSION = (() => {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const pkgPath = join(here, "..", "package.json");
+    return JSON.parse(readFileSync(pkgPath, "utf8")).version ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+})();
 function parseArgs(argv) {
   const args = {
     command: "help",
@@ -47,14 +58,14 @@ function printHelp() {
   process.stdout.write(`@susurration/installer — one-shot Susurration setup
 
 USAGE
-  npx -y @susurration/installer install --token sk_xxx
-  npx -y @susurration/installer uninstall
+  npx -y @susurration/installer@latest install --token <token>
+  npx -y @susurration/installer@latest uninstall
 
 OPTIONS
-  --token <sk_xxx>          Your SUSU bearer token (from https://susurration.xyz onboarding)
+  --token <token>           Your SUSU bearer token (from https://susurration.xyz onboarding)
   --base-url <url>          Backend base URL (default: ${DEFAULT_BASE_URL})
-  --runner-command <cli>    IDE-agent CLI to delegate decisions to. Auto-detected
-                            (claude → codex). Override for custom setups.
+  --runner-command <cli>    IDE-agent CLI to delegate decisions to. Auto-detects
+                            Claude Code; Codex runner support is gated.
   --runner-args <flags>     Flags passed before the prompt (default: -p).
   --no-prompt               Auto-confirm all prompts (CI mode)
   --only <ide>              Restrict to one IDE: claude | cursor | windsurf | cline | codex
@@ -160,7 +171,7 @@ async function promptIdeSelection(detected, noPrompt) {
     return installable;
   }
   process.stdout.write(`
-Detected IDEs (press Enter to install to ALL, or type comma-separated names to limit):
+Detected IDEs (press Enter to install to ALL, or type comma-separated numbers/names to limit):
 `);
   installable.forEach((d, i) => {
     process.stdout.write(`  [${i + 1}] ${d.name} (${d.id})
@@ -174,8 +185,25 @@ Your choice [all]: `);
   });
   if (line === "" || line.toLowerCase() === "all")
     return installable;
-  const picked = new Set(line.split(",").map((s) => s.trim().toLowerCase()));
-  return installable.filter((d) => picked.has(d.id) || picked.has(d.name.toLowerCase()));
+  const tokens = line.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+  const pickedIdx = new Set;
+  const pickedStr = new Set;
+  for (const t of tokens) {
+    const n = Number(t);
+    if (Number.isInteger(n) && n >= 1 && n <= installable.length) {
+      pickedIdx.add(n - 1);
+    } else {
+      pickedStr.add(t.toLowerCase());
+    }
+  }
+  const selected = installable.filter((d, i) => pickedIdx.has(i) || pickedStr.has(d.id) || pickedStr.has(d.name.toLowerCase()));
+  if (selected.length === 0) {
+    process.stdout.write(`
+${RED}No IDE matched "${line}". Use numbers (e.g. 1) or ids (e.g. claude).${RESET}
+`);
+    return promptIdeSelection(detected, noPrompt);
+  }
+  return selected;
 }
 function backupFile(path) {
   if (!existsSync(path))
@@ -207,12 +235,12 @@ function writeJsonAtomic(path, data) {
   }
 }
 function scrubSecrets(s) {
-  return s.replace(/sk_[A-Za-z0-9_-]+/g, "sk_***").replace(/sk-ant-[A-Za-z0-9_-]+/g, "sk-ant-***").replace(/sk-proj-[A-Za-z0-9_-]+/g, "sk-proj-***").replace(/sk-[A-Za-z0-9_-]+/g, "sk-***");
+  return s.replace(/Bearer\s+[A-Za-z0-9_-]{20,}/gi, "Bearer ***").replace(/sk_[A-Za-z0-9_-]+/g, "sk_***").replace(/sk-ant-[A-Za-z0-9_-]+/g, "sk-ant-***").replace(/sk-proj-[A-Za-z0-9_-]+/g, "sk-proj-***").replace(/sk-[A-Za-z0-9_-]+/g, "sk-***");
 }
 function mcpServerEntry(ctx) {
   return {
     command: "npx",
-    args: ["-y", MCP_NPM_NAME],
+    args: ["-y", MCP_NPX_SPEC],
     env: { SUSU_TOKEN: ctx.token, ...ctx.baseUrl !== DEFAULT_BASE_URL ? { SUSU_BASE_URL: ctx.baseUrl } : {} }
   };
 }
@@ -238,7 +266,7 @@ function configureClaudeCode(ctx) {
     "--",
     "npx",
     "-y",
-    MCP_NPM_NAME
+    MCP_NPX_SPEC
   ];
   const r = spawnSync("claude", args, { stdio: "pipe", encoding: "utf8" });
   if (r.status !== 0) {
@@ -407,23 +435,26 @@ function section(n, title) {
   log(`
 ${BOLD}[${n}/4] ${title}${RESET}`);
 }
+function looksLikeSusuToken(token) {
+  return /^[A-Za-z0-9_-]{20,}$/.test(token);
+}
 async function cmdInstall(args) {
   if (!args.token) {
     fail("missing --token. Get yours from https://susurration.xyz after registering.");
     return 1;
   }
-  if (!args.token.startsWith("sk_")) {
-    warn(`token doesn't start with "sk_" — proceeding anyway, but double-check it's the right value.`);
+  if (!looksLikeSusuToken(args.token)) {
+    warn(`token has an unexpected shape — proceeding anyway, but double-check you copied the full SUSU bearer token from the dashboard.`);
   }
   const telemetry = makeTelemetry(args.baseUrl, args.token);
   const installStart = Date.now();
   telemetry.started({
-    version: "0.0.1",
+    version: PKG_VERSION,
     node_version: process.version,
     platform: platform()
   });
   log(`
-${BOLD}Susurration installer${RESET}  ${DIM}v0.0.1${RESET}
+${BOLD}Susurration installer${RESET}  ${DIM}v${PKG_VERSION}${RESET}
 `);
   log(`Detecting installed AI IDEs…`);
   const allIdes = detectIdes();
@@ -451,6 +482,13 @@ ${BOLD}Susurration installer${RESET}  ${DIM}v0.0.1${RESET}
     return 1;
   }
   log(`Will configure: ${toConfigure.map((d) => d.name).join(", ")}`);
+  const runner = detectAgentRunner(args);
+  if (!runner) {
+    fail("No IDE-agent CLI found on PATH. Install Claude Code " + "(`npm install -g @anthropic-ai/claude-code`) or pass " + "--runner-command <cli-name> to use a different agent CLI.");
+    telemetry.complete(false, { fail_reason: "no_agent_runner" });
+    return 1;
+  }
+  ok(`agent runner ready: ${runner.display_name} (source: ${runner.source})`);
   section(1, "Installing agent daemon…");
   telemetry.stage(1, "running");
   const stage1Start = Date.now();
@@ -490,14 +528,6 @@ ${BOLD}Susurration installer${RESET}  ${DIM}v0.0.1${RESET}
   section(3, "Connecting to Susurration…");
   const stage3Start = Date.now();
   telemetry.stage(3, "running");
-  const runner = detectAgentRunner(args);
-  if (!runner) {
-    fail("No IDE-agent CLI found on PATH. Install Claude Code " + "(`npm install -g @anthropic-ai/claude-code`) or Codex CLI, then re-run.\n" + "Or pass --runner-command <cli-name> to use a different agent CLI.");
-    telemetry.stage(3, "fail", { error_hint: "no_agent_runner" });
-    telemetry.complete(false, { fail_reason: "no_agent_runner", total_elapsed_ms: Date.now() - installStart, ides_configured: configured });
-    return 1;
-  }
-  ok(`agent runner detected: ${runner.display_name} (source: ${runner.source})`);
   const configPath = writeDaemonConfig(args.token, args.baseUrl, runner);
   ok(`wrote ${configPath}`);
   const spawnResult = spawnDaemonDetached(configPath);

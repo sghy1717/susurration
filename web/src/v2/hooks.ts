@@ -12,6 +12,7 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { api, ApiError, apiBase, session } from "../api";
+import { FEED_SSE_EVENT_TYPES } from "./feedModel";
 
 // ── shared types ─────────────────────────────────────────────────────────
 
@@ -136,6 +137,13 @@ export interface PendingRequest {
   created_at: string;
 }
 
+export interface OutgoingRequest {
+  request_id: string;
+  to_addr: string;
+  to_username: string | null;
+  created_at: string;
+}
+
 export interface ChannelGroup {
   channel_id: string;
   name: string | null;
@@ -147,15 +155,15 @@ export interface ChannelGroup {
 
 export interface FeedItem {
   kind: string;
-  signal_id: string | null;
-  reaction_id: string | null;
+  signal_id?: string | null;
+  reaction_id?: string | null;
   parent_signal_id?: string | null;
-  channel_id: string;
-  from_address: string;
-  from_username: string | null;
-  payload: any;
+  channel_id?: string | null;
+  from_address?: string | null;
+  from_username?: string | null;
+  payload?: any;
   created_at: string;
-  channel_name: string | null;
+  channel_name?: string | null;
   is_group?: boolean;
   peer?: { address: string; username: string | null };
   is_auto?: boolean;
@@ -614,7 +622,7 @@ export function useDaemonUpgrade(): UpgradeStatus {
     latestVersion != null &&
     semverLT(currentVersion, latestVersion);
 
-  const installerCmd = ` npx -y @susurration/installer install --token ${session.token ?? "sk_live_YOUR_TOKEN"}`;
+  const installerCmd = ` npx -y @susurration/installer@latest install --token ${session.token ?? "<token>"}`;
 
   /** Copy the installer command to the clipboard. Used as fallback when
    *  the daemon localhost probe fails (daemon on a different machine /
@@ -793,6 +801,10 @@ export function usePendingRequests() {
   return usePoll<{ requests: PendingRequest[] }>("/friends/requests", 30_000);
 }
 
+export function useOutgoingRequests() {
+  return usePoll<{ requests: OutgoingRequest[] }>("/friends/requests/outgoing", 30_000);
+}
+
 export function useChannelGroups() {
   return usePoll<{ groups: ChannelGroup[] }>("/channels/groups", 30_000);
 }
@@ -965,7 +977,7 @@ export function useFeedSSE(initial: FeedItem[]) {
             setState(s => ({ ...s, events: [parsed, ...s.events].slice(0, 500) }));
           } catch { /* malformed event */ }
         };
-        ["signal", "reaction", "channel_member_added", "channel_member_removed", "channel_meta_changed", "channel_owner_transferred"].forEach(t => es!.addEventListener(t, ingest as any));
+        FEED_SSE_EVENT_TYPES.forEach(t => es!.addEventListener(t, ingest as any));
       } catch (e) {
         if (cancelled) return;
         setState(s => ({ ...s, status: "error", error: e instanceof Error ? e.message : String(e) }));

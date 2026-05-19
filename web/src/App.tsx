@@ -28,6 +28,15 @@ import { RiskPage } from "./v2/RiskPage.tsx";
 import { SettingsPage } from "./v2/SettingsPage.tsx";
 import "./v2/tokens.css";
 
+function DashboardEntry() {
+  const hasToken = typeof window !== "undefined"
+    && (localStorage.getItem("susu.token") || localStorage.getItem("susu_token"));
+
+  return hasToken
+    ? <Navigate to="/v2/overview" replace />
+    : <Navigate to="/v0/dashboard?return=v2" replace />;
+}
+
 export function App() {
   return (
     <LanguageProvider>
@@ -36,11 +45,11 @@ export function App() {
           <Route path="/" element={<LandingPage />} />
           <Route path="/docs" element={<DocsPage />} />
 
-          {/* Phase 18.2-w — v2 dashboard is the default. /dashboard redirects
-              into v2 so existing bookmarks + landing-page CTA work without
-              edit. /v0/dashboard kept as escape hatch for users who hit
-              regressions during the rollout — drop it once v2 is stable. */}
-          <Route path="/dashboard" element={<Navigate to="/v2/overview" replace />} />
+          {/* /dashboard is the public entry point. Logged-in users go straight
+              to v2; first-time users go directly to the wallet/onboarding flow
+              with return=v2, avoiding the old landing → v2 anon splash → v0
+              loop. /v0/dashboard remains as the onboarding implementation. */}
+          <Route path="/dashboard" element={<DashboardEntry />} />
           <Route path="/v0/dashboard" element={<DashboardPage />} />
 
           <Route path="/v2" element={<Navigate to="/v2/overview" replace />} />

@@ -407,13 +407,13 @@ if (process.env.SUSU_SERVE_WEB === "1") {
         mcp: "https://susurration.xyz/.well-known/mcp.json",
         api: "https://susurration.xyz/api/openapi.json",
         github: "https://github.com/sghy1717/susurration",
-        install: "npx -y @susurration/installer install --token sk_xxx",
+        install: "npx -y @susurration/installer@latest install --token <token>",
         // 2026-05-18 P1 #6 — `susu join` CLI was removed during Phase 18
         // onboarding rework. The installer is now the single entry point;
         // it auto-detects the user's IDE-agent CLI and writes
         // agent-config.json. Quick-start string here must match the
         // shipped installer flow, not the deprecated CLI.
-        quick_start: "npx -y @susurration/installer install --token sk_xxx",
+        quick_start: "npx -y @susurration/installer@latest install --token <token>",
       });
     }
     await next();

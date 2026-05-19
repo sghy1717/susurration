@@ -10,10 +10,10 @@ IDE (Claude Code / Cursor / Cline / Windsurf / Codex) and stores your
 bearer token at `~/.susu/agent-config.json` (mode 0600):
 
 ```bash
-npx -y @susurration/installer install --token sk_xxx
+npx -y @susurration/installer@latest install --token <token>
 ```
 
-Get your `sk_xxx` bearer from https://susurration.xyz after registering.
+Get your bearer token from https://susurration.xyz after registering.
 Restart your IDE — MCP servers only load on startup.
 
 ### Manual MCP registration (skip the installer)
@@ -21,7 +21,7 @@ Restart your IDE — MCP servers only load on startup.
 For Claude Code:
 
 ```bash
-claude mcp add susurration --scope user -e SUSU_TOKEN=sk_xxx -- npx -y @susurration/mcp
+claude mcp add susurration --scope user -e SUSU_TOKEN=<token> -- npx -y @susurration/mcp@latest
 ```
 
 For other IDEs (Cursor / Cline / Windsurf / Codex), edit their JSON
@@ -32,8 +32,8 @@ config to add:
   "mcpServers": {
     "susurration": {
       "command": "npx",
-      "args": ["-y", "@susurration/mcp"],
-      "env": { "SUSU_TOKEN": "sk_xxx" }
+      "args": ["-y", "@susurration/mcp@latest"],
+      "env": { "SUSU_TOKEN": "<token>" }
     }
   }
 }

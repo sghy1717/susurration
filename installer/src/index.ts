@@ -1,7 +1,7 @@
 // @susurration/installer — one-shot install for Susurration.
 //
 // USER COMMAND:
-//   npx -y @susurration/installer install --token sk_xxx
+//   npx -y @susurration/installer@latest install --token <token>
 //
 // FLOW (4 stages, each pinged to backend so web onboarding shows progress):
 //   1. install_daemon        → npm install -g susurration-agent-daemon
@@ -19,12 +19,29 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, renameSync, unlinkSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // ─── Config ────────────────────────────────────────────────────────────
 
 const DEFAULT_BASE_URL = "https://susurration.xyz/api";
 const DAEMON_NPM_NAME = "susurration-agent-daemon";
 const MCP_NPM_NAME = "@susurration/mcp";
+const MCP_NPX_SPEC = `${MCP_NPM_NAME}@latest`;
+
+// Read version from package.json so display + telemetry never drift from
+// the published npm version. Resolves relative to this file's location;
+// works both for the bundled bin/susu-installer.mjs and ts-source.
+const PKG_VERSION: string = (() => {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    // bin/susu-installer.mjs → ../package.json
+    // src/index.ts (bun run dev) → ../package.json
+    const pkgPath = join(here, "..", "package.json");
+    return JSON.parse(readFileSync(pkgPath, "utf8")).version ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+})();
 
 interface CliArgs {
   command: "install" | "uninstall" | "help";
@@ -73,14 +90,14 @@ function printHelp(): void {
   process.stdout.write(`@susurration/installer — one-shot Susurration setup
 
 USAGE
-  npx -y @susurration/installer install --token sk_xxx
-  npx -y @susurration/installer uninstall
+  npx -y @susurration/installer@latest install --token <token>
+  npx -y @susurration/installer@latest uninstall
 
 OPTIONS
-  --token <sk_xxx>          Your SUSU bearer token (from https://susurration.xyz onboarding)
+  --token <token>           Your SUSU bearer token (from https://susurration.xyz onboarding)
   --base-url <url>          Backend base URL (default: ${DEFAULT_BASE_URL})
-  --runner-command <cli>    IDE-agent CLI to delegate decisions to. Auto-detected
-                            (claude → codex). Override for custom setups.
+  --runner-command <cli>    IDE-agent CLI to delegate decisions to. Auto-detects
+                            Claude Code; Codex runner support is gated.
   --runner-args <flags>     Flags passed before the prompt (default: -p).
   --no-prompt               Auto-confirm all prompts (CI mode)
   --only <ide>              Restrict to one IDE: claude | cursor | windsurf | cline | codex
@@ -206,7 +223,7 @@ async function promptIdeSelection(detected: IdeInfo[], noPrompt: boolean): Promi
   if (noPrompt || !process.stdin.isTTY) {
     return installable;  // CI / non-TTY: install to all detected
   }
-  process.stdout.write(`\nDetected IDEs (press Enter to install to ALL, or type comma-separated names to limit):\n`);
+  process.stdout.write(`\nDetected IDEs (press Enter to install to ALL, or type comma-separated numbers/names to limit):\n`);
   installable.forEach((d, i) => {
     process.stdout.write(`  [${i + 1}] ${d.name} (${d.id})\n`);
   });
@@ -216,8 +233,27 @@ async function promptIdeSelection(detected: IdeInfo[], noPrompt: boolean): Promi
     process.stdin.once("data", (d) => resolve(d.toString().trim()));
   });
   if (line === "" || line.toLowerCase() === "all") return installable;
-  const picked = new Set(line.split(",").map((s) => s.trim().toLowerCase()));
-  return installable.filter((d) => picked.has(d.id) || picked.has(d.name.toLowerCase()));
+  // Accept either numeric indices ("1", "1,3") matching the displayed [N]
+  // labels, or id/name strings ("claude", "Claude Code"). Mixing is allowed.
+  const tokens = line.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+  const pickedIdx = new Set<number>();
+  const pickedStr = new Set<string>();
+  for (const t of tokens) {
+    const n = Number(t);
+    if (Number.isInteger(n) && n >= 1 && n <= installable.length) {
+      pickedIdx.add(n - 1);
+    } else {
+      pickedStr.add(t.toLowerCase());
+    }
+  }
+  const selected = installable.filter((d, i) =>
+    pickedIdx.has(i) || pickedStr.has(d.id) || pickedStr.has(d.name.toLowerCase()),
+  );
+  if (selected.length === 0) {
+    process.stdout.write(`\n${RED}No IDE matched "${line}". Use numbers (e.g. 1) or ids (e.g. claude).${RESET}\n`);
+    return promptIdeSelection(detected, noPrompt);
+  }
+  return selected;
 }
 
 // ─── MCP config writers ───────────────────────────────────────────────
@@ -257,10 +293,11 @@ function writeJsonAtomic(path: string, data: any): void {
 }
 
 /** Scrub bearer tokens / LLM API keys from a string before logging or
- *  sending in telemetry. Patterns: SUSU sk_xxx, Anthropic sk-ant-xxx,
+ *  sending in telemetry. Patterns: SUSU bearer token, Anthropic sk-ant-xxx,
  *  OpenAI sk-xxx (generic openai/deepseek/etc.) — replace value with `***`. */
 function scrubSecrets(s: string): string {
   return s
+    .replace(/Bearer\s+[A-Za-z0-9_-]{20,}/gi, "Bearer ***")
     .replace(/sk_[A-Za-z0-9_-]+/g, "sk_***")
     .replace(/sk-ant-[A-Za-z0-9_-]+/g, "sk-ant-***")
     .replace(/sk-proj-[A-Za-z0-9_-]+/g, "sk-proj-***")
@@ -270,7 +307,7 @@ function scrubSecrets(s: string): string {
 function mcpServerEntry(ctx: McpConfigContext) {
   return {
     command: "npx",
-    args: ["-y", MCP_NPM_NAME],
+    args: ["-y", MCP_NPX_SPEC],
     env: { SUSU_TOKEN: ctx.token, ...(ctx.baseUrl !== DEFAULT_BASE_URL ? { SUSU_BASE_URL: ctx.baseUrl } : {}) },
   };
 }
@@ -298,11 +335,11 @@ function configureClaudeCode(ctx: McpConfigContext): { ok: true } | { ok: false;
     "--scope", "user",
     "-e", `SUSU_TOKEN=${ctx.token}`,
     ...(ctx.baseUrl !== DEFAULT_BASE_URL ? ["-e", `SUSU_BASE_URL=${ctx.baseUrl}`] : []),
-    "--", "npx", "-y", MCP_NPM_NAME,
+    "--", "npx", "-y", MCP_NPX_SPEC,
   ];
   const r = spawnSync("claude", args, { stdio: "pipe", encoding: "utf8" });
   if (r.status !== 0) {
-    // claude CLI may echo argv (including -e SUSU_TOKEN=sk_xxx) into stderr on
+    // claude CLI may echo argv (including -e SUSU_TOKEN=<token>) into stderr on
     // parse errors. Scrub before exposing to telemetry / user terminal.
     return { ok: false, reason: `claude mcp add failed: ${scrubSecrets((r.stderr ?? "").slice(0, 200))}` };
   }
@@ -538,6 +575,9 @@ function fail(msg: string): void { log(`${RED}✗${RESET} ${msg}`); }
 function warn(msg: string): void { log(`${YELLOW}!${RESET} ${msg}`); }
 function info(msg: string): void { log(`${DIM}${msg}${RESET}`); }
 function section(n: number, title: string): void { log(`\n${BOLD}[${n}/4] ${title}${RESET}`); }
+function looksLikeSusuToken(token: string): boolean {
+  return /^[A-Za-z0-9_-]{20,}$/.test(token);
+}
 
 // ─── Main install orchestration ───────────────────────────────────────
 
@@ -546,20 +586,20 @@ async function cmdInstall(args: CliArgs): Promise<number> {
     fail("missing --token. Get yours from https://susurration.xyz after registering.");
     return 1;
   }
-  if (!args.token.startsWith("sk_")) {
-    warn(`token doesn't start with "sk_" — proceeding anyway, but double-check it's the right value.`);
+  if (!looksLikeSusuToken(args.token)) {
+    warn(`token has an unexpected shape — proceeding anyway, but double-check you copied the full SUSU bearer token from the dashboard.`);
   }
 
   const telemetry = makeTelemetry(args.baseUrl, args.token);
   const installStart = Date.now();
 
   void telemetry.started({
-    version: "0.0.1",
+    version: PKG_VERSION,
     node_version: process.version,
     platform: platform(),
   });
 
-  log(`\n${BOLD}Susurration installer${RESET}  ${DIM}v0.0.1${RESET}\n`);
+  log(`\n${BOLD}Susurration installer${RESET}  ${DIM}v${PKG_VERSION}${RESET}\n`);
 
   // ── Detect IDEs ─────────────────────────────────────────────────────
   log(`Detecting installed AI IDEs…`);
@@ -588,6 +628,23 @@ async function cmdInstall(args: CliArgs): Promise<number> {
     return 1;
   }
   log(`Will configure: ${toConfigure.map((d) => d.name).join(", ")}`);
+
+  // ── Precheck: agent runner must be available BEFORE we touch anything ─
+  // Detecting the headless-capable CLI (claude / codex / --runner-command)
+  // here — not at stage 3 — so a missing runner fails fast without leaving
+  // partial state behind (daemon installed globally + MCP config written
+  // into the user's IDE).
+  const runner = detectAgentRunner(args);
+  if (!runner) {
+    fail(
+      "No IDE-agent CLI found on PATH. Install Claude Code " +
+      "(`npm install -g @anthropic-ai/claude-code`) or pass " +
+      "--runner-command <cli-name> to use a different agent CLI.",
+    );
+    void telemetry.complete(false, { fail_reason: "no_agent_runner" });
+    return 1;
+  }
+  ok(`agent runner ready: ${runner.display_name} (source: ${runner.source})`);
 
   // ── Stage 1: install daemon ─────────────────────────────────────────
   section(1, "Installing agent daemon…");
@@ -633,21 +690,7 @@ async function cmdInstall(args: CliArgs): Promise<number> {
   section(3, "Connecting to Susurration…");
   const stage3Start = Date.now();
   void telemetry.stage(3, "running");
-  // Phase 18 — detect the user's IDE-agent CLI (Claude Code / Codex / etc.)
-  // No more LLM API key required. The daemon runs the user's CLI, which
-  // authenticates via its own subscription / login.
-  const runner = detectAgentRunner(args);
-  if (!runner) {
-    fail(
-      "No IDE-agent CLI found on PATH. Install Claude Code " +
-      "(`npm install -g @anthropic-ai/claude-code`) or Codex CLI, then re-run.\n" +
-      "Or pass --runner-command <cli-name> to use a different agent CLI.",
-    );
-    void telemetry.stage(3, "fail", { error_hint: "no_agent_runner" });
-    void telemetry.complete(false, { fail_reason: "no_agent_runner", total_elapsed_ms: Date.now() - installStart, ides_configured: configured });
-    return 1;
-  }
-  ok(`agent runner detected: ${runner.display_name} (source: ${runner.source})`);
+  // runner from precheck above
   const configPath = writeDaemonConfig(args.token, args.baseUrl, runner);
   ok(`wrote ${configPath}`);
   const spawnResult = spawnDaemonDetached(configPath);

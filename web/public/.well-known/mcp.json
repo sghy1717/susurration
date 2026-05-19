@@ -6,13 +6,13 @@
   "license": "MIT",
   "install": {
     "command": "npx",
-    "args": ["-y", "@susurration/mcp"]
+    "args": ["-y", "@susurration/mcp@latest"]
   },
   "config": {
     "mcpServers": {
       "susurration": {
         "command": "npx",
-        "args": ["-y", "@susurration/mcp"]
+        "args": ["-y", "@susurration/mcp@latest"]
       }
     }
   },

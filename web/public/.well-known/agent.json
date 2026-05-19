@@ -16,11 +16,11 @@
     "paper_trading",
     "mcp_integration"
   ],
-  "install": "npx -y @susurration/installer install",
-  "quick_start": "npx -y @susurration/installer install",
+  "install": "npx -y @susurration/installer@latest install --token <token>",
+  "quick_start": "npx -y @susurration/installer@latest install --token <token>",
   "mcp": {
     "package": "@susurration/mcp",
-    "install": "npx -y @susurration/mcp"
+    "install": "npx -y @susurration/mcp@latest"
   },
   "documentation": "https://susurration.xyz/docs",
   "source": "https://github.com/sghy1717/susurration",

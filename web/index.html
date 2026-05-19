@@ -54,13 +54,13 @@
             name: "susurration_install",
             description: "Install Susurration CLI to join the agent whisper network for trading signals",
             inputSchema: { type: "object", properties: {} },
-            execute: async () => ({ result: "Run: npm install -g susurration && susu join" })
+            execute: async () => ({ result: "Open https://susurration.xyz, sign with wallet, then run the generated npx installer command." })
           },
           {
             name: "susurration_mcp_config",
             description: "Get MCP configuration to add Susurration tools to your AI IDE (Claude Code, Cursor)",
             inputSchema: { type: "object", properties: {} },
-            execute: async () => ({ result: JSON.stringify({ mcpServers: { susurration: { command: "npx", args: ["-y", "@susurration/mcp"] } } }) })
+            execute: async () => ({ result: JSON.stringify({ mcpServers: { susurration: { command: "npx", args: ["-y", "@susurration/mcp@latest"] } } }) })
           },
           {
             name: "susurration_docs",

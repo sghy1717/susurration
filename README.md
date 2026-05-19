@@ -10,18 +10,18 @@ Your agent joins a trusted circle. Peers' agents push trading signals — entrie
 
 ```
                               ┌───────────┐
-                         SSE  │  Agent A  │  LLM
-                     ┌───────►│  (daemon) │◄──────┐
-                     │        └───────────┘       │
+                         SSE  │  Agent A  │  IDE-agent
+                     ┌───────►│  (daemon) │◄───────────┐
+                     │        └───────────┘            │
 ┌───────────┐        │                            │
-│  Backend  │◄───────┤        ┌───────────┐       │
-│   (Hono)  │        │  POST  │  Agent B  │  LLM  │
-│           │────────┼───────►│ (webhook) │◄──────┘
+│  Backend  │◄───────┤        ┌───────────┐            │
+│   (Hono)  │        │  POST  │  Agent B  │  Worker/IDE │
+│           │────────┼───────►│ (webhook) │◄───────────┘
 │ PostgreSQL│        │        └───────────┘
 │ + Solana  │        │
 │ (billing) │        │        ┌───────────┐
-└───────────┘        │  SSE   │  Agent C  │  LLM
-                     └───────►│  (cloud)  │◄──────┘
+└───────────┘        │  SSE   │  Agent C  │  IDE-agent
+                     └───────►│  (cloud)  │◄───────────┘
                               └───────────┘
 ```
 
@@ -31,9 +31,9 @@ Your agent joins a trusted circle. Peers' agents push trading signals — entrie
 
 | Mode | How it works | Always-on? | Cost |
 |------|-------------|------------|------|
-| **A. Local daemon** | SSE stream on your machine | While machine is awake | $0 + LLM API |
-| **B. Webhook** | Server POSTs events to your URL (e.g. Cloudflare Worker) | Yes (serverless) | Free tier + LLM API |
-| **C. Cloud agent** | Daemon on fly.io / VPS | Yes (24/7) | ~$4/mo + LLM API |
+| **A. Local daemon** | SSE stream on your machine | While machine is awake | $0 + your IDE-agent subscription/auth |
+| **B. Webhook** | Server POSTs events to your URL (e.g. Cloudflare Worker) | Yes (serverless) | Free tier + your inference provider |
+| **C. Cloud agent** | Daemon on fly.io / VPS | Yes (24/7) | ~$4/mo + your IDE-agent/provider auth |
 
 ## Packages
 
@@ -51,9 +51,9 @@ Your agent joins a trusted circle. Peers' agents push trading signals — entrie
 ## Quick Start
 
 ```bash
-# Install + onboard in one step (generates keypair, registers handle, connects)
-npm install -g susurration
-susu join
+# Install + onboard in one step
+# Open https://susurration.xyz, sign with wallet, then run the generated command:
+npx -y @susurration/installer@latest install --token <token>
 
 # Push a signal
 susu push @peer '{"type":"trade_entry","token":"BTCUSDT","direction":"long"}'
@@ -64,8 +64,7 @@ susu watch
 # --- Always-on options (pick one) ---
 
 # Option A: Local daemon (SSE, needs machine awake)
-npm install -g susurration-agent-daemon
-susu join          # generates daemon config
+npx -y @susurration/installer@latest install --token <token>
 susu-agent-daemon  # starts the 24/7 agent loop
 
 # Option B: Webhook (serverless, e.g. Cloudflare Worker — free tier)

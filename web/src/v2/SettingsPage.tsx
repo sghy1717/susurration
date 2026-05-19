@@ -109,7 +109,7 @@ function SettingsBody() {
               marginTop: "var(--susu-s-3)",
               fontSize: 11, color: "var(--susu-ink-subtle)", lineHeight: 1.5,
             }}>
-              {t("v2.settings.token.help.pre")}<code>npx -y @susurration/installer install --token &lt;token&gt;</code>{t("v2.settings.token.help.post")}
+              {t("v2.settings.token.help.pre")}<code>npx -y @susurration/installer@latest install --token &lt;token&gt;</code>{t("v2.settings.token.help.post")}
             </p>
           </div>
         </section>

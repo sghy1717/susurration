@@ -19,7 +19,7 @@ import { stripControlCharsDeep, stripControlChars } from "../../shared/strip-con
 const HELP = `susu — Susurration CLI (alias of \`susurration\`)
 
 Quick Start
-  npx -y @susurration/installer install       One-shot setup (wallet + handle + IDE + daemon)
+  npx -y @susurration/installer@latest install --token <token>  One-shot setup (wallet + handle + IDE + daemon)
   susu join                                   Deprecated — prints the installer command above
 
 Account
@@ -267,8 +267,8 @@ async function cmdJoin(args: string[]): Promise<number> {
     "  instead of calling an LLM SDK directly. The installer detects which\n" +
     "  IDE you have, wires up its MCP config, and starts the daemon for you.\n\n" +
     "  Run this instead:\n\n" +
-    "    npx -y @susurration/installer install" +
-      (safeToken ? ` --token ${safeToken}` : "") +
+    "    npx -y @susurration/installer@latest install" +
+      (safeToken ? ` --token ${safeToken}` : " --token <token>") +
       (safeOnly ? ` --only ${safeOnly}` : "") +
     "\n\n" +
     "  Then come back here for the day-to-day commands:\n" +

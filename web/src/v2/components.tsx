@@ -550,7 +550,7 @@ type AnyEvent = {
   channel_id?: string;
   channel_name?: string | null;
   is_group?: boolean;
-  from_address: string;
+  from_address?: string | null;
   from_username?: string | null;
   payload?: any;
   created_at: string;
@@ -584,7 +584,11 @@ export function StructuredEventCard({
   const isClose = ev.kind === "close" || ev.kind === "paper_close" || ev.kind === "close_paper";
   const side = ev.payload?.direction ?? ev.payload?.side;
   const token = ev.payload?.token;
-  const handle = ev.from_username ? `@${ev.from_username}` : `${ev.from_address.slice(0, 6)}…`;
+  const handle = ev.from_username
+    ? `@${ev.from_username}`
+    : ev.from_address
+      ? `${ev.from_address.slice(0, 6)}…`
+      : "system";
   const channel = ev.channel_name ?? "DM";
   const channelLabel = ev.is_group ? `#${channel}` : channel;
   const reactPol = isReaction ? reactionValueOf(ev.payload) : null;
