@@ -82,8 +82,8 @@ export function Shell({ pageLabel, topbarAux, topbarActions, children }: ShellPr
   // don't see the empty rail + a topbar dot that "daemon" status is unknown.
   if (isAnon) {
     return (
-      <div className="susu-shell">
-        <main className="susu-main" style={{ marginLeft: 0 }}>
+      <div className="susu-shell" style={{ gridTemplateColumns: "1fr" }}>
+        <main className="susu-main">
           <AnonSplash />
         </main>
       </div>
